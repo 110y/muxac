@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Setup Go
+        uses: actions/setup-go@v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Format
+        run: |
+          ! go tool gofumpt -d $(go list -f "{{.Dir}}" ./... | grep -vE "(internal/database/sqlc)") | grep -E '^'
+
+      - name: Import
+        run: |
+          ! go tool gci diff $(go list -f "{{.Dir}}" ./... | grep -vE "(internal/database/sqlc)") -s standard -s default -s localmodule --skip-vendor < /dev/null | grep -E '^'
+
+      - name: Lint
+        run: go tool golangci-lint run --config ./.golangci.yaml
+
+      - name: Test
+        run: GORACE=atexit_sleep_ms=0 go test -vet=off -mod=readonly -race -shuffle=on -timeout=10m ./...
+
+      - name: Build
+        uses: goreleaser/goreleaser-action@v7.0.0
+        with:
+          version: v2.14.1
+          args: build --snapshot

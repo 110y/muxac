@@ -1,0 +1,30 @@
+name: tagpr
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: read
+
+jobs:
+  tagpr:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Generate token
+        id: generate-token
+        uses: actions/create-github-app-token@v2.2.1
+        with:
+          app-id: ${{ vars.CD_GITHUB_APP_ID }}
+          private-key: ${{ secrets.CD_GITHUB_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: Songmu/tagpr@v1.17.1
+        env:
+          GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}

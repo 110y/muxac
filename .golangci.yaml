@@ -1,0 +1,93 @@
+version: "2"
+run:
+  modules-download-mode: readonly
+  issues-exit-code: 1
+  tests: true
+  allow-parallel-runners: true
+  allow-serial-runners: true
+output:
+  formats:
+    text:
+      path: stdout
+      print-linter-name: true
+      print-issued-lines: true
+      colors: true
+  sort-order:
+    - file
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - containedctx
+    - errcheck
+    - exhaustive
+    - forbidigo
+    - gocheckcompilerdirectives
+    - gosec
+    - govet
+    - importas
+    - ineffassign
+    - nolintlint
+    - revive
+    - staticcheck
+    - unparam
+    - unused
+    - usetesting
+    - wastedassign
+    - whitespace
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    exhaustive:
+      check:
+        - switch
+        - map
+      default-signifies-exhaustive: false
+      explicit-exhaustive-map: true
+      explicit-exhaustive-switch: true
+    gosec:
+      excludes:
+        - G115
+    govet:
+      disable-all: true
+    nolintlint:
+      allow-unused: false
+    revive:
+      enable-all-rules: false
+      rules:
+        - name: duplicated-imports
+          severity: error
+        - name: imports-blocklist
+          arguments:
+            - github.com/jackc/pgtype
+    staticcheck:
+      checks:
+        - all
+        - "-ST1000"
+        - "-ST1003"
+        - "-ST1016"
+        - "-ST1020"
+        - "-ST1021"
+        - "-ST1022"
+    usetesting:
+      context-background: true
+      context-todo: true
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - path: (.+)\.go$
+        text: declaration of "ctx" shadows declaration at
+      - path: (.+)\.go$
+        text: declaration of "err" shadows declaration at
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  uniq-by-line: true
+  new: false

@@ -1,0 +1,32 @@
+version: 2
+
+builds:
+  - main: .
+    binary: muxac
+    flags:
+      - -a
+      - -trimpath
+    ldflags:
+      - -s -w -extldflags -static -X github.com/110y/muxac/internal/version.Version={{.Version}}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - format: tar.gz
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github-native
+
+release:
+  github:
+    owner: 110y
+    name: muxac

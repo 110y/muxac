@@ -105,6 +105,14 @@ func run() error {
 			if err != nil {
 				return err
 			}
+			workDir = filepath.Clean(workDir)
+			fi, err := os.Stat(workDir) //nolint:gosec // workDir is sanitized via filepath.Abs and filepath.Clean.
+			if err != nil {
+				return fmt.Errorf("--dir %q: %w", dir, err)
+			}
+			if !fi.IsDir() {
+				return fmt.Errorf("--dir %q is not a directory", dir)
+			}
 		} else {
 			workDir, err = os.Getwd()
 			if err != nil {

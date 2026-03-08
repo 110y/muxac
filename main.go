@@ -19,6 +19,7 @@ import (
 	"github.com/110y/muxac/internal/monitor"
 	"github.com/110y/muxac/internal/newcmd"
 	"github.com/110y/muxac/internal/tmux"
+	"github.com/110y/muxac/internal/version"
 )
 
 //go:embed db/schema.sql
@@ -35,6 +36,11 @@ func run() error {
 	if len(os.Args) < 2 {
 		usage()
 		return fmt.Errorf("no command specified")
+	}
+
+	if os.Args[1] == "version" {
+		fmt.Fprintf(os.Stdout, "%s\n", version.Version)
+		return nil
 	}
 
 	homeDir := os.Getenv("HOME")
@@ -195,5 +201,6 @@ Commands:
   new [--name <name>] [--dir <path>] [--env KEY=VALUE ...] [--tmux-conf <path>] <command>  Create a new tmux session
   attach [--name <name>] [--dir <path>]                               Attach to an existing tmux session
   list [--no-header] [--json]                                          List all muxac sessions with their status
-  hook                                                                Update status based on coding agent hook event (reads JSON from stdin)`)
+  hook                                                                Update status based on coding agent hook event (reads JSON from stdin)
+  version                                                             Show version information`)
 }

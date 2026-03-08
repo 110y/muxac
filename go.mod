@@ -1,6 +1,6 @@
 module github.com/110y/muxac
 
-go 1.26.0
+go 1.26.1
 
 require modernc.org/sqlite v1.46.1
 

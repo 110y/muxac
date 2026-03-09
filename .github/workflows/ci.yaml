@@ -23,12 +23,22 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Actionlint
+        run: go tool actionlint
+
+      - name: Pinact
+        run: go tool pinact run --check
+
       - name: Format
         run: |
+          # Word splitting is intentional to pass each directory as a separate argument.
+          # shellcheck disable=SC2046
           ! go tool gofumpt -d $(go list -f "{{.Dir}}" ./... | grep -vE "(internal/database/sqlc)") | grep -E '^'
 
       - name: Import
         run: |
+          # Word splitting is intentional to pass each directory as a separate argument.
+          # shellcheck disable=SC2046
           ! go tool gci diff $(go list -f "{{.Dir}}" ./... | grep -vE "(internal/database/sqlc)") -s standard -s default -s localmodule --skip-vendor < /dev/null | grep -E '^'
 
       - name: Lint

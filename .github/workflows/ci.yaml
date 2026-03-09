@@ -16,19 +16,29 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Setup Go
-        uses: actions/setup-go@v6.3.0
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
           go-version-file: go.mod
 
+      - name: Actionlint
+        run: go tool actionlint
+
+      - name: Pinact
+        run: go tool pinact run --check
+
       - name: Format
         run: |
+          # Word splitting is intentional to pass each directory as a separate argument.
+          # shellcheck disable=SC2046
           ! go tool gofumpt -d $(go list -f "{{.Dir}}" ./... | grep -vE "(internal/database/sqlc)") | grep -E '^'
 
       - name: Import
         run: |
+          # Word splitting is intentional to pass each directory as a separate argument.
+          # shellcheck disable=SC2046
           ! go tool gci diff $(go list -f "{{.Dir}}" ./... | grep -vE "(internal/database/sqlc)") -s standard -s default -s localmodule --skip-vendor < /dev/null | grep -E '^'
 
       - name: Lint
@@ -38,7 +48,7 @@ jobs:
         run: GORACE=atexit_sleep_ms=0 go test -vet=off -mod=readonly -race -shuffle=on -timeout=10m ./...
 
       - name: Build
-        uses: goreleaser/goreleaser-action@v7.0.0
+        uses: goreleaser/goreleaser-action@ec59f474b9834571250b370d4735c50f8e2d1e29 # v7.0.0
         with:
           version: v2.14.1
           args: build --snapshot

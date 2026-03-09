@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 jobs:
-  ci:
+  lint:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -44,8 +44,35 @@ jobs:
       - name: Lint
         run: go tool golangci-lint run --config ./.golangci.yaml
 
+  test:
+    strategy:
+      matrix:
+        os:
+          - ubuntu-24.04
+          - macos-15
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
       - name: Test
         run: GORACE=atexit_sleep_ms=0 go test -vet=off -mod=readonly -race -shuffle=on -timeout=10m ./...
+
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
 
       - name: Build
         uses: goreleaser/goreleaser-action@ec59f474b9834571250b370d4735c50f8e2d1e29 # v7.0.0

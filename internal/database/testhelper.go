@@ -2,7 +2,7 @@ package database
 
 import (
 	"database/sql"
-	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,16 +13,20 @@ import (
 	"github.com/110y/muxac/internal/database/sqlc"
 )
 
-func LoadDDL() (string, error) {
+func loadMigrations() fs.FS {
 	_, filename, _, _ := runtime.Caller(0)
-	data, err := os.ReadFile(filepath.Join(filepath.Dir(filename), "..", "..", "db", "schema.sql"))
-	if err != nil {
-		return "", fmt.Errorf("read schema.sql: %w", err)
-	}
-	return string(data), nil
+	dir := filepath.Join(filepath.Dir(filename), "..", "..", "db", "migrations")
+	return os.DirFS(dir)
 }
 
 func SetupTestDB(t *testing.T) *sqlc.Queries {
+	t.Helper()
+
+	queries, _ := SetupTestDBWithConn(t)
+	return queries
+}
+
+func SetupTestDBWithConn(t *testing.T) (*sqlc.Queries, *sql.DB) {
 	t.Helper()
 
 	conn, err := sql.Open("sqlite", ":memory:")
@@ -35,14 +39,9 @@ func SetupTestDB(t *testing.T) *sqlc.Queries {
 		t.Fatal(err)
 	}
 
-	ddl, err := LoadDDL()
-	if err != nil {
+	if err := migrate(t.Context(), conn, loadMigrations()); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := conn.ExecContext(t.Context(), ddl); err != nil {
-		t.Fatal(err)
-	}
-
-	return sqlc.New(conn)
+	return sqlc.New(conn), conn
 }

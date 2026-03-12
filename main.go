@@ -2,8 +2,9 @@ package main
 
 import (
 	"context"
-	_ "embed"
+	"embed"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -22,8 +23,8 @@ import (
 	"github.com/110y/muxac/internal/version"
 )
 
-//go:embed db/schema.sql
-var ddl string
+//go:embed db/migrations/*.sql
+var migrationsFS embed.FS
 
 func main() {
 	if err := run(); err != nil {
@@ -55,10 +56,21 @@ func run() error {
 	}
 
 	homeDir := os.Getenv("HOME")
+	cacheBase := os.Getenv("XDG_CACHE_HOME")
+	if cacheBase == "" {
+		cacheBase = filepath.Join(homeDir, ".cache")
+	}
+	cacheDir := filepath.Join(cacheBase, "muxac")
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	queries, conn, err := database.Open(ctx, ddl)
+	migrations, err := fs.Sub(migrationsFS, "db/migrations")
+	if err != nil {
+		return err
+	}
+
+	queries, conn, err := database.Open(ctx, migrations, cacheDir)
 	if err != nil {
 		return err
 	}
@@ -120,7 +132,7 @@ func run() error {
 				return err
 			}
 			workDir = filepath.Clean(workDir)
-			fi, err := os.Stat(workDir) //nolint:gosec // workDir is sanitized via filepath.Abs and filepath.Clean.
+			fi, err := os.Stat(workDir)
 			if err != nil {
 				return fmt.Errorf("--dir %q: %w", dir, err)
 			}
@@ -136,7 +148,7 @@ func run() error {
 		if err := monitor.EnsureRunning(ctx, tmuxRunner, queries); err != nil {
 			return err
 		}
-		return newcmd.Run(ctx, tmuxRunner, queries, name, workDir, tmuxConf, command, env)
+		return newcmd.Run(ctx, tmuxRunner, queries, name, workDir, tmuxConf, command, cacheDir, env)
 
 	case "attach":
 		name := "default"
@@ -226,7 +238,7 @@ func run() error {
 			}
 		}
 		logger := slog.New(dblog.NewHandler(queries, slog.LevelError))
-		return monitor.Run(ctx, tmuxRunner, queries, homeDir, logger)
+		return monitor.Run(ctx, tmuxRunner, queries, homeDir, cacheDir, logger)
 
 	default:
 		usage()

@@ -15,6 +15,7 @@ type Tool int
 const (
 	Unknown Tool = iota
 	Claude
+	Codex
 )
 
 // DetectTool determines which coding tool is running based on
@@ -31,6 +32,8 @@ func ProjectDir(tool Tool, claudeProjectDir string) string {
 	switch tool {
 	case Claude:
 		return claudeProjectDir
+	case Codex:
+		return ""
 	case Unknown:
 		return ""
 	}
@@ -42,6 +45,8 @@ func (t Tool) String() string {
 	switch t {
 	case Claude:
 		return "claude"
+	case Codex:
+		return "codex"
 	case Unknown:
 		return "unknown"
 	}
@@ -54,6 +59,8 @@ func ToolFromString(s string) Tool {
 	switch s {
 	case "claude":
 		return Claude
+	case "codex":
+		return Codex
 	default:
 		return Unknown
 	}
@@ -65,10 +72,17 @@ func JsonlPath(tool Tool, homeDir, projectDir, sessionID string) string {
 	switch tool {
 	case Claude:
 		return filepath.Join(homeDir, ".claude", "projects", pathkey.ClaudeProjectDir(projectDir), sessionID+".jsonl")
+	case Codex:
+		return ""
 	case Unknown:
 		return ""
 	}
 	return ""
+}
+
+// CodexSessionLogPath returns the file path for a Codex TUI session log.
+func CodexSessionLogPath(cacheDir, tmuxSessionName string) string {
+	return filepath.Join(cacheDir, "codex", "sessions", tmuxSessionName+".jsonl")
 }
 
 // NormalizeEvent maps a tool-specific hook event name to the canonical event
@@ -77,6 +91,8 @@ func JsonlPath(tool Tool, homeDir, projectDir, sessionID string) string {
 func NormalizeEvent(tool Tool, rawEvent string) string {
 	switch tool {
 	case Claude:
+		return rawEvent
+	case Codex:
 		return rawEvent
 	case Unknown:
 		// Fall back to Claude conventions for unknown tools.

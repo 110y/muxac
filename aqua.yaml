@@ -1,0 +1,7 @@
+---
+registries:
+  - type: standard
+    ref: v4.482.0
+
+packages:
+  - name: ariga/atlas@v1.1.0

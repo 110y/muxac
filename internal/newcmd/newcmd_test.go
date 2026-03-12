@@ -2,6 +2,7 @@ package newcmd_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/110y/muxac/internal/database"
@@ -68,7 +69,7 @@ func TestRun_NewSession(t *testing.T) {
 	tmux := newFakeTmux()
 	queries := database.SetupTestDB(t)
 
-	err := newcmd.Run(ctx, tmux, queries, "default", "/home/user/project", "/path/to/tmux.conf", "claude", []string{"MY_VAR=hello"})
+	err := newcmd.Run(ctx, tmux, queries, "default", "/home/user/project", "/path/to/tmux.conf", "claude", t.TempDir(), []string{"MY_VAR=hello"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -84,8 +85,8 @@ func TestRun_NewSession(t *testing.T) {
 	if ns.Command != "claude" {
 		t.Errorf("command = %q, want %q", ns.Command, "claude")
 	}
-	if len(ns.Env) != 2 || ns.Env[0] != "MY_VAR=hello" || ns.Env[1] != "MUXAC_SESSION_NAME=default" {
-		t.Errorf("env = %v, want [MY_VAR=hello MUXAC_SESSION_NAME=default]", ns.Env)
+	if len(ns.Env) < 4 || ns.Env[0] != "MY_VAR=hello" || ns.Env[1] != "MUXAC_SESSION_NAME=default" || ns.Env[2] != "CODEX_TUI_RECORD_SESSION=1" {
+		t.Errorf("env = %v, want [MY_VAR=hello MUXAC_SESSION_NAME=default CODEX_TUI_RECORD_SESSION=1 CODEX_TUI_SESSION_LOG_PATH=...]", ns.Env)
 	}
 	if ns.SourceFile != "/path/to/tmux.conf" {
 		t.Errorf("sourceFile = %q, want %q", ns.SourceFile, "/path/to/tmux.conf")
@@ -111,7 +112,7 @@ func TestRun_SessionAlreadyExists(t *testing.T) {
 	tmux.sessions["muxac-default@home@user@project"] = true
 	queries := database.SetupTestDB(t)
 
-	err := newcmd.Run(ctx, tmux, queries, "default", "/home/user/project", "", "claude", nil)
+	err := newcmd.Run(ctx, tmux, queries, "default", "/home/user/project", "", "claude", t.TempDir(), nil)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -128,7 +129,7 @@ func TestRun_InjectsMUXACSessionName(t *testing.T) {
 	tmux := newFakeTmux()
 	queries := database.SetupTestDB(t)
 
-	err := newcmd.Run(ctx, tmux, queries, "foo", "/home/user/project", "", "claude", nil)
+	err := newcmd.Run(ctx, tmux, queries, "foo", "/home/user/project", "", "claude", t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -138,8 +139,8 @@ func TestRun_InjectsMUXACSessionName(t *testing.T) {
 	}
 
 	ns := tmux.newSessions[0]
-	if len(ns.Env) != 1 || ns.Env[0] != "MUXAC_SESSION_NAME=foo" {
-		t.Errorf("env = %v, want [MUXAC_SESSION_NAME=foo]", ns.Env)
+	if len(ns.Env) < 3 || ns.Env[0] != "MUXAC_SESSION_NAME=foo" || ns.Env[1] != "CODEX_TUI_RECORD_SESSION=1" {
+		t.Errorf("env = %v, want [MUXAC_SESSION_NAME=foo CODEX_TUI_RECORD_SESSION=1 CODEX_TUI_SESSION_LOG_PATH=...]", ns.Env)
 	}
 }
 
@@ -151,7 +152,7 @@ func TestRun_EnvVarsForwarded(t *testing.T) {
 	queries := database.SetupTestDB(t)
 
 	env := []string{"MY_VAR=hello", "OTHER_VAR=world"}
-	err := newcmd.Run(ctx, tmux, queries, "default", "/home/user/project", "", "claude", env)
+	err := newcmd.Run(ctx, tmux, queries, "default", "/home/user/project", "", "claude", t.TempDir(), env)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -161,8 +162,8 @@ func TestRun_EnvVarsForwarded(t *testing.T) {
 	}
 
 	ns := tmux.newSessions[0]
-	if len(ns.Env) != 3 {
-		t.Fatalf("env length = %d, want 3", len(ns.Env))
+	if len(ns.Env) != 5 {
+		t.Fatalf("env length = %d, want 5", len(ns.Env))
 	}
 	if ns.Env[0] != "MY_VAR=hello" {
 		t.Errorf("env[0] = %q, want %q", ns.Env[0], "MY_VAR=hello")
@@ -173,6 +174,12 @@ func TestRun_EnvVarsForwarded(t *testing.T) {
 	if ns.Env[2] != "MUXAC_SESSION_NAME=default" {
 		t.Errorf("env[2] = %q, want %q", ns.Env[2], "MUXAC_SESSION_NAME=default")
 	}
+	if ns.Env[3] != "CODEX_TUI_RECORD_SESSION=1" {
+		t.Errorf("env[3] = %q, want %q", ns.Env[3], "CODEX_TUI_RECORD_SESSION=1")
+	}
+	if !strings.HasPrefix(ns.Env[4], "CODEX_TUI_SESSION_LOG_PATH=") {
+		t.Errorf("env[4] = %q, want prefix CODEX_TUI_SESSION_LOG_PATH=", ns.Env[4])
+	}
 }
 
 func TestRun_EmptyTmuxConf(t *testing.T) {
@@ -182,7 +189,7 @@ func TestRun_EmptyTmuxConf(t *testing.T) {
 	tmux := newFakeTmux()
 	queries := database.SetupTestDB(t)
 
-	err := newcmd.Run(ctx, tmux, queries, "default", "/home/user/project", "", "claude", nil)
+	err := newcmd.Run(ctx, tmux, queries, "default", "/home/user/project", "", "claude", t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -203,7 +210,7 @@ func TestRun_CustomTmuxConf(t *testing.T) {
 	tmux := newFakeTmux()
 	queries := database.SetupTestDB(t)
 
-	err := newcmd.Run(ctx, tmux, queries, "default", "/home/user/project", "/custom/tmux.conf", "claude", nil)
+	err := newcmd.Run(ctx, tmux, queries, "default", "/home/user/project", "/custom/tmux.conf", "claude", t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

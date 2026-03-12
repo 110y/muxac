@@ -5,8 +5,11 @@ package database
 import (
 	"context"
 	"database/sql"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	_ "modernc.org/sqlite"
 
@@ -14,10 +17,16 @@ import (
 )
 
 // Open opens (or creates) the SQLite database and returns ready-to-use Queries and the underlying connection.
-func Open(ctx context.Context, ddl string) (*sqlc.Queries, *sql.DB, error) {
-	dbFile := dbPath()
+// cacheDir is the muxac cache directory (e.g. ~/.cache/muxac); the database file is stored at cacheDir/db.
+// migrations is an fs.FS containing SQL migration files (e.g. from go:embed).
+func Open(ctx context.Context, migrations fs.FS, cacheDir string) (*sqlc.Queries, *sql.DB, error) {
+	dbFile := filepath.Join(cacheDir, "db")
 
 	if err := os.MkdirAll(filepath.Dir(dbFile), 0o755); err != nil {
+		return nil, nil, err
+	}
+
+	if err := resetIfNeeded(ctx, dbFile); err != nil {
 		return nil, nil, err
 	}
 
@@ -39,117 +48,119 @@ func Open(ctx context.Context, ddl string) (*sqlc.Queries, *sql.DB, error) {
 		}
 	}
 
-	if _, err := conn.ExecContext(ctx, ddl); err != nil {
+	if err := migrate(ctx, conn, migrations); err != nil {
 		conn.Close()
 		return nil, nil, err
-	}
-
-	// Migrate: drop old-schema table so DDL recreates it with new columns.
-	var hasOldSchema int
-	row := conn.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'path_key'")
-	if err := row.Scan(&hasOldSchema); err != nil {
-		conn.Close()
-		return nil, nil, err
-	}
-	if hasOldSchema > 0 {
-		if _, err := conn.ExecContext(ctx, "DROP TABLE sessions"); err != nil {
-			conn.Close()
-			return nil, nil, err
-		}
-	}
-
-	// Migrate: replace checksum-based schema with agent_session_id, preserving existing rows.
-	var hasChecksumCol int
-	row = conn.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'content_checksum'")
-	if err := row.Scan(&hasChecksumCol); err != nil {
-		conn.Close()
-		return nil, nil, err
-	}
-	if hasChecksumCol > 0 {
-		if _, err := conn.ExecContext(ctx, `CREATE TABLE sessions_new (
-			name               TEXT NOT NULL,
-			path               TEXT NOT NULL,
-			status             TEXT NOT NULL CHECK (status IN ('running', 'waiting', 'stopped', 'unknown')),
-			agent_session_id   TEXT NOT NULL DEFAULT '',
-			created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-			updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-			PRIMARY KEY (name, path)
-		)`); err != nil {
-			conn.Close()
-			return nil, nil, err
-		}
-		if _, err := conn.ExecContext(ctx, `INSERT INTO sessions_new (name, path, status, created_at, updated_at)
-			SELECT name, path, status, created_at, updated_at FROM sessions`); err != nil {
-			conn.Close()
-			return nil, nil, err
-		}
-		if _, err := conn.ExecContext(ctx, `DROP TABLE sessions`); err != nil {
-			conn.Close()
-			return nil, nil, err
-		}
-		if _, err := conn.ExecContext(ctx, `ALTER TABLE sessions_new RENAME TO sessions`); err != nil {
-			conn.Close()
-			return nil, nil, err
-		}
-	}
-
-	// Migrate: rename claude_session_id → agent_session_id.
-	var hasClaudeCol int
-	row = conn.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'claude_session_id'")
-	if err := row.Scan(&hasClaudeCol); err != nil {
-		conn.Close()
-		return nil, nil, err
-	}
-	if hasClaudeCol > 0 {
-		if _, err := conn.ExecContext(ctx,
-			"ALTER TABLE sessions RENAME COLUMN claude_session_id TO agent_session_id"); err != nil {
-			conn.Close()
-			return nil, nil, err
-		}
-	}
-
-	// Migrate: add version column to monitor_heartbeat.
-	var hasVersionCol int
-	row = conn.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM pragma_table_info('monitor_heartbeat') WHERE name = 'version'")
-	if err := row.Scan(&hasVersionCol); err != nil {
-		conn.Close()
-		return nil, nil, err
-	}
-	if hasVersionCol == 0 {
-		if _, err := conn.ExecContext(ctx,
-			"ALTER TABLE monitor_heartbeat ADD COLUMN version TEXT NOT NULL DEFAULT ''"); err != nil {
-			conn.Close()
-			return nil, nil, err
-		}
-	}
-
-	// Migrate: add agent_tool column to sessions.
-	var hasAgentToolCol int
-	row = conn.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'agent_tool'")
-	if err := row.Scan(&hasAgentToolCol); err != nil {
-		conn.Close()
-		return nil, nil, err
-	}
-	if hasAgentToolCol == 0 {
-		if _, err := conn.ExecContext(ctx,
-			"ALTER TABLE sessions ADD COLUMN agent_tool TEXT NOT NULL DEFAULT ''"); err != nil {
-			conn.Close()
-			return nil, nil, err
-		}
 	}
 
 	return sqlc.New(conn), conn, nil
 }
 
-func dbPath() string {
-	dir := os.Getenv("XDG_CACHE_HOME")
-	if dir == "" {
-		dir = filepath.Join(os.Getenv("HOME"), ".cache")
+func resetIfNeeded(ctx context.Context, dbFile string) error {
+	if _, err := os.Stat(dbFile); err != nil {
+		return nil
 	}
-	return filepath.Join(dir, "muxac", "db")
+
+	conn, err := sql.Open("sqlite", dbFile)
+	if err != nil {
+		return err
+	}
+
+	var count int
+	err = conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='_migrations'").Scan(&count)
+	conn.Close()
+	if err != nil {
+		return err
+	}
+
+	if count > 0 {
+		return nil
+	}
+
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		os.Remove(dbFile + suffix)
+	}
+
+	return nil
+}
+
+func migrate(ctx context.Context, conn *sql.DB, migrations fs.FS) error {
+	if _, err := conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS _migrations (
+		version TEXT NOT NULL PRIMARY KEY
+	)`); err != nil {
+		return err
+	}
+
+	files, err := collectMigrations(migrations)
+	if err != nil {
+		return err
+	}
+
+	for _, f := range files {
+		applied, err := isMigrationApplied(ctx, conn, f.version)
+		if err != nil {
+			return err
+		}
+		if applied {
+			continue
+		}
+
+		content, err := fs.ReadFile(migrations, f.path)
+		if err != nil {
+			return err
+		}
+
+		if _, err := conn.ExecContext(ctx, string(content)); err != nil {
+			return err
+		}
+
+		if _, err := conn.ExecContext(ctx, "INSERT INTO _migrations (version) VALUES (?)", f.version); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+type migrationFile struct {
+	version string
+	path    string
+}
+
+func collectMigrations(migrations fs.FS) ([]migrationFile, error) {
+	var files []migrationFile
+
+	err := fs.WalkDir(migrations, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(path, ".sql") {
+			return nil
+		}
+		name := filepath.Base(path)
+		version := strings.TrimSuffix(name, ".sql")
+		files = append(files, migrationFile{version: version, path: path})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].version < files[j].version
+	})
+
+	return files, nil
+}
+
+func isMigrationApplied(ctx context.Context, conn *sql.DB, version string) (bool, error) {
+	var count int
+	err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM _migrations WHERE version = ?", version).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }

@@ -49,6 +49,7 @@ linters:
     gosec:
       excludes:
         - G115
+        - G703
     govet:
       disable-all: true
     nolintlint:

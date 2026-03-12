@@ -1,11 +1,8 @@
 package monitor
 
 import (
-	"database/sql"
 	"testing"
 	"time"
-
-	_ "modernc.org/sqlite"
 
 	"github.com/110y/muxac/internal/database"
 	"github.com/110y/muxac/internal/database/sqlc"
@@ -105,30 +102,14 @@ func TestEnsureRunning_SessionExistsStaleHeartbeat(t *testing.T) {
 	ft.sessions[monitorSessionName] = true
 
 	// Insert a stale heartbeat (20 seconds ago).
-	conn, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { conn.Close() })
-	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
-		t.Fatal(err)
-	}
-	ddl, err := database.LoadDDL()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := conn.ExecContext(ctx, ddl); err != nil {
-		t.Fatal(err)
-	}
-	// Use a raw query to insert a stale timestamp.
+	queries, conn := database.SetupTestDBWithConn(t)
 	staleTS := time.Now().Add(-20 * time.Second).UTC().Format(timestamp.Format)
-	_, err = conn.ExecContext(ctx,
+	_, err := conn.ExecContext(ctx,
 		"INSERT INTO monitor_heartbeat (id, version, updated_at) VALUES (1, ?, ?)",
 		version.Version, staleTS)
 	if err != nil {
 		t.Fatal(err)
 	}
-	queries := sqlc.New(conn)
 
 	err = EnsureRunning(ctx, ft, queries)
 	if err != nil {

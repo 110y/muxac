@@ -21,6 +21,11 @@ func TestToolString(t *testing.T) {
 			want: "claude",
 		},
 		{
+			name: "Codex returns codex",
+			tool: agent.Codex,
+			want: "codex",
+		},
+		{
 			name: "Unknown returns unknown",
 			tool: agent.Unknown,
 			want: "unknown",
@@ -85,6 +90,12 @@ func TestProjectDir(t *testing.T) {
 			want:             "/home/user/project",
 		},
 		{
+			name:             "Codex returns empty string",
+			tool:             agent.Codex,
+			claudeProjectDir: "/home/user/project",
+			want:             "",
+		},
+		{
 			name:             "Unknown returns empty string",
 			tool:             agent.Unknown,
 			claudeProjectDir: "/home/user/project",
@@ -115,6 +126,11 @@ func TestToolFromString(t *testing.T) {
 			name: "claude returns Claude",
 			s:    "claude",
 			want: agent.Claude,
+		},
+		{
+			name: "codex returns Codex",
+			s:    "codex",
+			want: agent.Codex,
 		},
 		{
 			name: "empty returns Unknown",
@@ -176,6 +192,16 @@ func TestJsonlPath(t *testing.T) {
 				t.Errorf("JsonlPath() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCodexSessionLogPath(t *testing.T) {
+	t.Parallel()
+
+	got := agent.CodexSessionLogPath("/home/user/.cache/muxac", "muxac-default@home@user@project")
+	want := filepath.Join("/home/user/.cache/muxac", "codex", "sessions", "muxac-default@home@user@project.jsonl")
+	if got != want {
+		t.Errorf("CodexSessionLogPath() = %q, want %q", got, want)
 	}
 }
 

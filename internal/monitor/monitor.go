@@ -24,8 +24,8 @@ import (
 // Run starts a monitoring loop that syncs session statuses between tmux and the database.
 // It runs an initial sync immediately, then repeats every second.
 // Returns nil on context cancellation.
-func Run(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, homeDir string, logger *slog.Logger) error {
-	if err := sync(ctx, tmuxRunner, queries, homeDir); err != nil {
+func Run(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, homeDir, cacheDir string, logger *slog.Logger) error {
+	if err := sync(ctx, tmuxRunner, queries, homeDir, cacheDir); err != nil {
 		logger.ErrorContext(ctx, "sync failed", "error", err)
 	}
 
@@ -37,7 +37,7 @@ func Run(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, hom
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := sync(ctx, tmuxRunner, queries, homeDir); err != nil {
+			if err := sync(ctx, tmuxRunner, queries, homeDir, cacheDir); err != nil {
 				logger.ErrorContext(ctx, "sync failed", "error", err)
 			}
 		}
@@ -71,7 +71,7 @@ func isInterruptionLine(line jsonlLine) bool {
 	return c.Type == "text" && strings.HasPrefix(c.Text, "[Request interrupted by user")
 }
 
-func sync(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, homeDir string) error {
+func sync(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, homeDir, cacheDir string) error {
 	var errs []error
 
 	threshold := time.Now().Add(-7 * 24 * time.Hour).UTC().Format(timestamp.Format)
@@ -102,7 +102,7 @@ func sync(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, ho
 	}
 
 	for _, sess := range dbSessions {
-		if err := syncSession(ctx, queries, homeDir, sess, alive); err != nil {
+		if err := syncSession(ctx, queries, homeDir, cacheDir, sess, alive); err != nil {
 			errs = append(errs, fmt.Errorf("sync session %s/%s: %w", sess.Name, sess.Path, err))
 		}
 	}
@@ -110,8 +110,9 @@ func sync(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, ho
 	return errors.Join(errs...)
 }
 
-func syncSession(ctx context.Context, queries *sqlc.Queries, homeDir string, sess sqlc.ListSessionsRow, alive map[string]bool) error {
+func syncSession(ctx context.Context, queries *sqlc.Queries, homeDir, cacheDir string, sess sqlc.ListSessionsRow, alive map[string]bool) error {
 	tmuxName := pathkey.TmuxSessionName(sess.Name, sess.Path)
+	codexLogPath := agent.CodexSessionLogPath(cacheDir, tmuxName)
 
 	if !alive[tmuxName] {
 		if err := queries.DeleteSession(ctx, sqlc.DeleteSessionParams{
@@ -120,14 +121,36 @@ func syncSession(ctx context.Context, queries *sqlc.Queries, homeDir string, ses
 		}); err != nil {
 			return fmt.Errorf("delete dead session: %w", err)
 		}
-		return nil
-	}
-
-	if sess.AgentSessionID == "" {
+		os.Remove(codexLogPath)
 		return nil
 	}
 
 	tool := agent.ToolFromString(sess.AgentTool)
+
+	// Auto-detect Codex by checking if the session log file exists.
+	if tool == agent.Unknown {
+		if _, err := os.Stat(codexLogPath); err == nil {
+			tool = agent.Codex
+			if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+				AgentTool: tool.String(),
+				UpdatedAt: timestamp.Now(),
+				Name:      sess.Name,
+				Path:      sess.Path,
+			}); err != nil {
+				return fmt.Errorf("update agent tool to codex: %w", err)
+			}
+		}
+	}
+
+	if tool == agent.Codex {
+		return syncCodexSession(ctx, queries, cacheDir, sess, tmuxName)
+	}
+
+	// Claude logic: require agent_session_id.
+	if sess.AgentSessionID == "" {
+		return nil
+	}
+
 	jsonlPath := agent.JsonlPath(tool, homeDir, sess.Path, sess.AgentSessionID)
 	if jsonlPath == "" {
 		return nil
@@ -216,4 +239,115 @@ func syncSession(ctx context.Context, queries *sqlc.Queries, homeDir string, ses
 	}
 
 	return nil
+}
+
+type codexLogLine struct {
+	Ts      string          `json:"ts"`
+	Dir     string          `json:"dir"`
+	Kind    string          `json:"kind"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+// codexEventMsg is the internally-tagged msg inside a codex_event payload.
+// Codex uses #[serde(tag = "type", rename_all = "snake_case")].
+type codexEventMsg struct {
+	Type string `json:"type"`
+}
+
+// codexEventPayload is the payload of a codex_event log line.
+// It wraps an Event struct with id + msg fields.
+type codexEventPayload struct {
+	Msg codexEventMsg `json:"msg"`
+}
+
+// codexOpPayload is the internally-tagged payload of an op log line.
+type codexOpPayload struct {
+	Type     string `json:"type"`
+	Decision string `json:"decision"`
+}
+
+func codexEventToStatus(line codexLogLine) (status.Status, bool) {
+	switch line.Kind {
+	case "session_end":
+		return status.Stopped, true
+	case "codex_event":
+		var p codexEventPayload
+		if json.Unmarshal(line.Payload, &p) != nil {
+			return "", false
+		}
+		switch p.Msg.Type {
+		case "task_started", "turn_started":
+			return status.Running, true
+		case "task_complete", "turn_complete", "turn_aborted", "shutdown_complete":
+			return status.Stopped, true
+		case "exec_approval_request", "apply_patch_approval_request", "request_permissions", "request_user_input":
+			return status.Waiting, true
+		}
+	case "op":
+		var op codexOpPayload
+		if json.Unmarshal(line.Payload, &op) != nil {
+			return "", false
+		}
+		switch op.Type {
+		case "user_input", "user_turn":
+			return status.Running, true
+		case "interrupt":
+			return status.Stopped, true
+		case "exec_approval", "patch_approval":
+			if op.Decision == "abort" {
+				return status.Stopped, true
+			}
+			return status.Running, true
+		}
+	}
+	return "", false
+}
+
+func syncCodexSession(ctx context.Context, queries *sqlc.Queries, cacheDir string, sess sqlc.ListSessionsRow, tmuxName string) error {
+	logPath := agent.CodexSessionLogPath(cacheDir, tmuxName)
+
+	f, err := os.Open(logPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return nil
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+
+	var lastStatus status.Status
+	var lastTs string
+	for scanner.Scan() {
+		var line codexLogLine
+		if json.Unmarshal(scanner.Bytes(), &line) != nil {
+			continue
+		}
+		if st, ok := codexEventToStatus(line); ok {
+			lastStatus = st
+			lastTs = line.Ts
+		}
+	}
+
+	if lastStatus == "" {
+		return nil
+	}
+
+	if lastTs <= sess.UpdatedAt {
+		return nil
+	}
+
+	if lastStatus == status.Status(sess.Status) {
+		return nil
+	}
+
+	return queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
+		Status:    string(lastStatus),
+		UpdatedAt: timestamp.Now(),
+		Name:      sess.Name,
+		Path:      sess.Path,
+		Status_2:  sess.Status,
+	})
 }

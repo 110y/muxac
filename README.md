@@ -20,6 +20,7 @@ For example, the creator of `muxac` uses it with [fzf](https://github.com/junegu
 
 ```bash
 # Create a new Agentic Coding session for the current directory with an Agentic Coding tool command like `claude`.
+# (You can use arbitrary arguments or options for the command as usual.)
 $ muxac new claude
 
 # You can detach from the session by pressing `Ctrl+b d`.
@@ -144,7 +145,18 @@ Add the following hook configuration to your Claude Code settings file (e.g. `~/
 </details>
 
 <details>
-<summary>Codex (Not yet supported, coming soon...)</summary>
+<summary>Codex</summary>
+
+No additional configuration is required. `muxac` automatically detects Codex sessions and monitors their status via TUI session logs.
+
+Simply create a new session with the `codex` command like:
+
+```bash
+$ muxac new codex
+```
+
+> **Note:** `muxac` automatically sets `CODEX_TUI_RECORD_SESSION` and `CODEX_TUI_SESSION_LOG_PATH` environment variables in the Codex session to monitor session status.
+
 </details>
 
 <details>
@@ -163,7 +175,7 @@ Add the following hook configuration to your Claude Code settings file (e.g. `~/
 
 ### `muxac new`
 
-Creates a new tmux session and launches the specified agentic coding tool.
+Creates a new session and launches the specified agentic coding tool.
 
 ```bash
 $ muxac new [--name <name>] [--dir <path>] [--env KEY=VALUE ...] [--tmux-conf <path>] <command>
@@ -198,7 +210,7 @@ DIRECTORY          NAME     STATUS
 
 ### `muxac attach`
 
-Attaches to an existing tmux session.
+Attaches to an existing session.
 
 ```bash
 $ muxac attach [--name <name>] [--dir <path>]

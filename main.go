@@ -132,7 +132,7 @@ func run() error {
 				return err
 			}
 			workDir = filepath.Clean(workDir)
-			fi, err := os.Stat(workDir) //nolint:gosec // path is sanitized via filepath.Abs and filepath.Clean above
+			fi, err := os.Stat(workDir)
 			if err != nil {
 				return fmt.Errorf("--dir %q: %w", dir, err)
 			}

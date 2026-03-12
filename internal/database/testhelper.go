@@ -13,10 +13,10 @@ import (
 	"github.com/110y/muxac/internal/database/sqlc"
 )
 
-func LoadMigrations() (fs.FS, error) {
+func loadMigrations() fs.FS {
 	_, filename, _, _ := runtime.Caller(0)
 	dir := filepath.Join(filepath.Dir(filename), "..", "..", "db", "migrations")
-	return os.DirFS(dir), nil
+	return os.DirFS(dir)
 }
 
 func SetupTestDB(t *testing.T) *sqlc.Queries {
@@ -39,12 +39,7 @@ func SetupTestDBWithConn(t *testing.T) (*sqlc.Queries, *sql.DB) {
 		t.Fatal(err)
 	}
 
-	migrations, err := LoadMigrations()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if err := migrate(t.Context(), conn, migrations); err != nil {
+	if err := migrate(t.Context(), conn, loadMigrations()); err != nil {
 		t.Fatal(err)
 	}
 

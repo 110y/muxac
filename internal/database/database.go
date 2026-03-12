@@ -58,7 +58,10 @@ func Open(ctx context.Context, migrations fs.FS, cacheDir string) (*sqlc.Queries
 
 func resetIfNeeded(ctx context.Context, dbFile string) error {
 	if _, err := os.Stat(dbFile); err != nil {
-		return nil
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
 	}
 
 	conn, err := sql.Open("sqlite", dbFile)
@@ -110,16 +113,30 @@ func migrate(ctx context.Context, conn *sql.DB, migrations fs.FS) error {
 			return err
 		}
 
-		if _, err := conn.ExecContext(ctx, string(content)); err != nil {
-			return err
-		}
-
-		if _, err := conn.ExecContext(ctx, "INSERT INTO _migrations (version) VALUES (?)", f.version); err != nil {
+		if err := applyMigration(ctx, conn, f, content); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func applyMigration(ctx context.Context, conn *sql.DB, f migrationFile, content []byte) error {
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // rollback after commit is harmless
+
+	if _, err := tx.ExecContext(ctx, string(content)); err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx, "INSERT INTO _migrations (version) VALUES (?)", f.version); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 type migrationFile struct {

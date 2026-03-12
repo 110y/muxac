@@ -21,6 +21,28 @@ import (
 	"github.com/110y/muxac/internal/version"
 )
 
+// isAfter parses two timestamp strings and returns true if a is strictly after b.
+// It tries timestamp.Format first, then falls back to time.RFC3339Nano.
+// Returns false if either timestamp cannot be parsed.
+func isAfter(a, b string) bool {
+	ta, err := parseTimestamp(a)
+	if err != nil {
+		return false
+	}
+	tb, err := parseTimestamp(b)
+	if err != nil {
+		return false
+	}
+	return ta.After(tb)
+}
+
+func parseTimestamp(s string) (time.Time, error) {
+	if t, err := time.Parse(timestamp.Format, s); err == nil {
+		return t, nil
+	}
+	return time.Parse(time.RFC3339Nano, s)
+}
+
 // Run starts a monitoring loop that syncs session statuses between tmux and the database.
 // It runs an initial sync immediately, then repeats every second.
 // Returns nil on context cancellation.
@@ -174,7 +196,7 @@ func syncSession(ctx context.Context, queries *sqlc.Queries, homeDir, cacheDir s
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return nil
+		return fmt.Errorf("open jsonl %q: %w", jsonlPath, err)
 	}
 	defer f.Close()
 
@@ -199,9 +221,12 @@ func syncSession(ctx context.Context, queries *sqlc.Queries, homeDir, cacheDir s
 			return fmt.Errorf("upsert jsonl entry: %w", err)
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("scan jsonl %q: %w", jsonlPath, err)
+	}
 
 	// Interruption check takes priority over waiting→running.
-	if isInterruptionLine(lastLine) && lastLine.Timestamp > sess.UpdatedAt {
+	if isInterruptionLine(lastLine) && isAfter(lastLine.Timestamp, sess.UpdatedAt) {
 		st := status.Status(sess.Status)
 		if st == status.Running || st == status.Waiting {
 			if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
@@ -226,7 +251,7 @@ func syncSession(ctx context.Context, queries *sqlc.Queries, homeDir, cacheDir s
 	}
 
 	st := status.Status(sess.Status)
-	if st == status.Waiting && current.Uuid != prev.Uuid && current.Timestamp > sess.UpdatedAt {
+	if st == status.Waiting && current.Uuid != prev.Uuid && isAfter(current.Timestamp, sess.UpdatedAt) {
 		if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
 			Status:    string(status.Running),
 			UpdatedAt: timestamp.Now(),
@@ -311,7 +336,7 @@ func syncCodexSession(ctx context.Context, queries *sqlc.Queries, cacheDir strin
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return nil
+		return fmt.Errorf("open codex session log %q: %w", logPath, err)
 	}
 	defer f.Close()
 
@@ -330,12 +355,15 @@ func syncCodexSession(ctx context.Context, queries *sqlc.Queries, cacheDir strin
 			lastTs = line.Ts
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("scan codex session log %q: %w", logPath, err)
+	}
 
 	if lastStatus == "" {
 		return nil
 	}
 
-	if lastTs <= sess.UpdatedAt {
+	if !isAfter(lastTs, sess.UpdatedAt) {
 		return nil
 	}
 

@@ -3,7 +3,6 @@ package monitor
 import (
 	"bufio"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -169,9 +168,11 @@ func syncSession(ctx context.Context, queries *sqlc.Queries, homeDir, cacheDir s
 		return syncCodexSession(ctx, queries, cacheDir, sess, tmuxName)
 	case agent.Claude:
 		return syncClaudeCodeSession(ctx, queries, homeDir, sess)
-	default:
+	case agent.Unknown:
 		return nil
 	}
+
+	return nil
 }
 
 func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir string, sess sqlc.ListSessionsRow) error {
@@ -182,19 +183,6 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 	jsonlPath := agent.JsonlPath(agent.Claude, homeDir, sess.Path, sess.AgentSessionID)
 	if jsonlPath == "" {
 		return nil
-	}
-
-	entryParams := sqlc.GetLatestJsonlEntryParams{
-		SessionName: sess.Name,
-		SessionPath: sess.Path,
-	}
-
-	prev, err := queries.GetLatestJsonlEntry(ctx, entryParams)
-	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("get latest jsonl entry: %w", err)
-		}
-		prev = sqlc.GetLatestJsonlEntryRow{}
 	}
 
 	f, err := os.Open(jsonlPath)
@@ -209,22 +197,15 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	var lastLine jsonlLine
+	var maxTimestamp string
 	for scanner.Scan() {
 		var line jsonlLine
 		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
 			continue
 		}
 		lastLine = line
-		if line.UUID == "" {
-			continue
-		}
-		if err := queries.UpsertJsonlEntry(ctx, sqlc.UpsertJsonlEntryParams{
-			SessionName: sess.Name,
-			SessionPath: sess.Path,
-			Uuid:        line.UUID,
-			Timestamp:   line.Timestamp,
-		}); err != nil {
-			return fmt.Errorf("upsert jsonl entry: %w", err)
+		if line.Timestamp != "" && (maxTimestamp == "" || isAfter(line.Timestamp, maxTimestamp)) {
+			maxTimestamp = line.Timestamp
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -248,16 +229,8 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 		return nil
 	}
 
-	current, err := queries.GetLatestJsonlEntry(ctx, entryParams)
-	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("get current jsonl entry: %w", err)
-		}
-		current = sqlc.GetLatestJsonlEntryRow{}
-	}
-
 	st := status.Status(sess.Status)
-	if st == status.Waiting && current.Uuid != prev.Uuid && isAfter(current.Timestamp, sess.UpdatedAt) {
+	if st == status.Waiting && isAfter(maxTimestamp, sess.UpdatedAt) {
 		if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
 			Status:    string(status.Running),
 			UpdatedAt: timestamp.Now(),

@@ -1,12 +1,11 @@
 package monitor
 
 import (
-	"bufio"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -169,9 +168,72 @@ func syncSession(ctx context.Context, queries *sqlc.Queries, homeDir, cacheDir s
 		return syncCodexSession(ctx, queries, cacheDir, sess, tmuxName)
 	case agent.Claude:
 		return syncClaudeCodeSession(ctx, queries, homeDir, sess)
-	default:
+	case agent.Unknown:
 		return nil
 	}
+
+	return nil
+}
+
+// readLastLines reads the last n non-empty lines from a file by seeking
+// backward from the end in chunks. It returns os.IsNotExist errors as-is.
+func readLastLines(filePath string, n int) ([]string, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	size, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, fmt.Errorf("seek end %q: %w", filePath, err)
+	}
+	if size == 0 {
+		return nil, nil
+	}
+
+	const chunkSize = 8192
+	var buf []byte
+	offset := size
+	needed := n + 1 // need n+1 newlines to delimit n lines
+
+	for offset > 0 {
+		readSize := min(int64(chunkSize), offset)
+		offset -= readSize
+
+		chunk := make([]byte, readSize)
+		if _, err := f.ReadAt(chunk, offset); err != nil && err != io.EOF {
+			return nil, fmt.Errorf("read chunk %q: %w", filePath, err)
+		}
+
+		buf = append(chunk, buf...)
+
+		count := 0
+		for _, b := range buf {
+			if b == '\n' {
+				count++
+			}
+		}
+		if count >= needed {
+			break
+		}
+	}
+
+	lines := strings.Split(string(buf), "\n")
+
+	// Filter empty strings (from leading/trailing newlines).
+	result := make([]string, 0, len(lines))
+	for _, l := range lines {
+		if l != "" {
+			result = append(result, l)
+		}
+	}
+
+	if len(result) > n {
+		result = result[len(result)-n:]
+	}
+
+	return result, nil
 }
 
 func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir string, sess sqlc.ListSessionsRow) error {
@@ -184,51 +246,25 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 		return nil
 	}
 
-	entryParams := sqlc.GetLatestJsonlEntryParams{
-		SessionName: sess.Name,
-		SessionPath: sess.Path,
-	}
-
-	prev, err := queries.GetLatestJsonlEntry(ctx, entryParams)
-	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("get latest jsonl entry: %w", err)
-		}
-		prev = sqlc.GetLatestJsonlEntryRow{}
-	}
-
-	f, err := os.Open(jsonlPath)
+	lines, err := readLastLines(jsonlPath, 10)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return fmt.Errorf("open jsonl %q: %w", jsonlPath, err)
+		return fmt.Errorf("read jsonl tail %q: %w", jsonlPath, err)
 	}
-	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	var lastLine jsonlLine
-	for scanner.Scan() {
+	var maxTimestamp string
+	for _, raw := range lines {
 		var line jsonlLine
-		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+		if err := json.Unmarshal([]byte(raw), &line); err != nil {
 			continue
 		}
 		lastLine = line
-		if line.UUID == "" {
-			continue
+		if line.Timestamp != "" && (maxTimestamp == "" || isAfter(line.Timestamp, maxTimestamp)) {
+			maxTimestamp = line.Timestamp
 		}
-		if err := queries.UpsertJsonlEntry(ctx, sqlc.UpsertJsonlEntryParams{
-			SessionName: sess.Name,
-			SessionPath: sess.Path,
-			Uuid:        line.UUID,
-			Timestamp:   line.Timestamp,
-		}); err != nil {
-			return fmt.Errorf("upsert jsonl entry: %w", err)
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scan jsonl %q: %w", jsonlPath, err)
 	}
 
 	// Interruption check takes priority over waiting→running.
@@ -248,16 +284,8 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 		return nil
 	}
 
-	current, err := queries.GetLatestJsonlEntry(ctx, entryParams)
-	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("get current jsonl entry: %w", err)
-		}
-		current = sqlc.GetLatestJsonlEntryRow{}
-	}
-
 	st := status.Status(sess.Status)
-	if st == status.Waiting && current.Uuid != prev.Uuid && isAfter(current.Timestamp, sess.UpdatedAt) {
+	if st == status.Waiting && isAfter(maxTimestamp, sess.UpdatedAt) {
 		if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
 			Status:    string(status.Running),
 			UpdatedAt: timestamp.Now(),
@@ -334,35 +362,85 @@ func codexEventToStatus(line codexLogLine) (status.Status, bool) {
 	return "", false
 }
 
+// findLastCodexStatus reads the file backward in chunks and returns the most
+// recent status-relevant Codex event. It stops as soon as a status event is
+// found, avoiding a full file scan. Returns os.IsNotExist errors as-is.
+func findLastCodexStatus(filePath string) (status.Status, string, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", "", err
+	}
+	defer f.Close()
+
+	size, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return "", "", fmt.Errorf("seek end %q: %w", filePath, err)
+	}
+	if size == 0 {
+		return "", "", nil
+	}
+
+	const chunkSize = 8192
+	var remainder []byte
+	offset := size
+
+	for offset > 0 {
+		readSize := min(int64(chunkSize), offset)
+		offset -= readSize
+
+		chunk := make([]byte, readSize)
+		if _, err := f.ReadAt(chunk, offset); err != nil && err != io.EOF {
+			return "", "", fmt.Errorf("read chunk %q: %w", filePath, err)
+		}
+
+		data := append(chunk, remainder...)
+		parts := strings.Split(string(data), "\n")
+
+		// First element may be a partial line unless we reached BOF.
+		if offset > 0 {
+			remainder = []byte(parts[0])
+			parts = parts[1:]
+		} else {
+			remainder = nil
+		}
+
+		// Scan from newest (end) to oldest (start).
+		for i := len(parts) - 1; i >= 0; i-- {
+			if parts[i] == "" {
+				continue
+			}
+			var cl codexLogLine
+			if json.Unmarshal([]byte(parts[i]), &cl) != nil {
+				continue
+			}
+			if st, ok := codexEventToStatus(cl); ok {
+				return st, cl.Ts, nil
+			}
+		}
+	}
+
+	// Process any remaining partial line from the very beginning.
+	if len(remainder) > 0 {
+		var cl codexLogLine
+		if json.Unmarshal(remainder, &cl) == nil {
+			if st, ok := codexEventToStatus(cl); ok {
+				return st, cl.Ts, nil
+			}
+		}
+	}
+
+	return "", "", nil
+}
+
 func syncCodexSession(ctx context.Context, queries *sqlc.Queries, cacheDir string, sess sqlc.ListSessionsRow, tmuxName string) error {
 	logPath := agent.CodexSessionLogPath(cacheDir, tmuxName)
 
-	f, err := os.Open(logPath)
+	lastStatus, lastTs, err := findLastCodexStatus(logPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return fmt.Errorf("open codex session log %q: %w", logPath, err)
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-
-	var lastStatus status.Status
-	var lastTs string
-	for scanner.Scan() {
-		var line codexLogLine
-		if json.Unmarshal(scanner.Bytes(), &line) != nil {
-			continue
-		}
-		if st, ok := codexEventToStatus(line); ok {
-			lastStatus = st
-			lastTs = line.Ts
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scan codex session log %q: %w", logPath, err)
+		return fmt.Errorf("read codex session log %q: %w", logPath, err)
 	}
 
 	if lastStatus == "" {

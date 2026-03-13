@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -108,7 +109,7 @@ func TestSync(t *testing.T) {
 		}
 	})
 
-	t.Run("waiting becomes running via UUID change", func(t *testing.T) {
+	t.Run("waiting becomes running when JSONL timestamp postdates updated_at", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
@@ -131,41 +132,26 @@ func TestSync(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// First sync: no JSONL file yet, no UUID recorded
+		// Write JSONL with a timestamp far in the future, guaranteeing it postdates updated_at.
+		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
+			`{"uuid":"uuid-1","timestamp":"2099-01-01T00:00:01.000Z"}`+"\n")
+
+		// Sync: JSONL max timestamp postdates updated_at, transitions to running
 		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
 			t.Fatal(err)
 		}
 		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
-			Name: "default", Path: "/home/user/project",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got != "waiting" {
-			t.Fatalf("after first sync: got %q, want waiting", got)
-		}
-
-		// Write JSONL with a new UUID whose timestamp is far in the future,
-		// guaranteeing it postdates the session's updated_at.
-		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
-			`{"uuid":"uuid-1","timestamp":"2099-01-01T00:00:01.000Z"}`+"\n")
-
-		// Second sync: new UUID detected with future timestamp, transitions to running
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
-			t.Fatal(err)
-		}
-		got, err = queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
 			Name: "default", Path: "/home/user/project",
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got != "running" {
-			t.Errorf("after second sync: got %q, want running", got)
+			t.Errorf("got %q, want running", got)
 		}
 	})
 
-	t.Run("no transition when no new UUIDs", func(t *testing.T) {
+	t.Run("no re-transition when already running", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
@@ -188,16 +174,16 @@ func TestSync(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Write JSONL with initial UUID (future timestamp to postdate updated_at)
+		// Write JSONL with future timestamp to postdate updated_at
 		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
 			`{"uuid":"uuid-1","timestamp":"2099-01-01T00:00:01.000Z"}`+"\n")
 
-		// First sync: records UUID and transitions to running
+		// First sync: transitions to running
 		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
 			t.Fatal(err)
 		}
 
-		// Second sync: same JSONL content, no new UUID
+		// Second sync: status is already running, the st == status.Waiting guard prevents re-triggering
 		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
 			t.Fatal(err)
 		}
@@ -207,8 +193,6 @@ func TestSync(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// The first sync transitioned to running (prevUUID="" -> currentUUID="uuid-1"),
-		// but the second sync should not change it further since no new UUIDs
 		if got != "running" {
 			t.Errorf("after second sync: got %q, want running", got)
 		}
@@ -380,16 +364,16 @@ func TestSync(t *testing.T) {
 		}
 	})
 
-	t.Run("old UUIDs predating waiting do not trigger transition", func(t *testing.T) {
+	t.Run("old timestamps predating waiting do not trigger transition", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
 		queries := database.SetupTestDB(t)
 		homeDir := t.TempDir()
 
-		// Session starts as running
+		// Session is waiting (updated_at = now, guaranteed > 2000-...)
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -406,26 +390,10 @@ func TestSync(t *testing.T) {
 
 		// Write JSONL entries with timestamps in the past (before waiting was set)
 		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
-			`{"uuid":"uuid-old","timestamp":"2000-01-01T00:00:01.000Z"}`+"\n")
-
-		// First sync: records uuid-old while session is running
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
-			t.Fatal(err)
-		}
-
-		// Simulate hook setting status to waiting (updated_at = now, guaranteed > 2000-...)
-		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
-		}); err != nil {
-			t.Fatal(err)
-		}
-
-		// Write another JSONL entry that also predates the waiting transition
-		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
 			`{"uuid":"uuid-old","timestamp":"2000-01-01T00:00:01.000Z"}`+"\n"+
 				`{"uuid":"uuid-new-but-old-ts","timestamp":"2000-01-01T00:00:02.000Z"}`+"\n")
 
-		// Second sync: finds new UUID but its timestamp predates updated_at
+		// Sync: max timestamp predates updated_at, no transition
 		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
 			t.Fatal(err)
 		}
@@ -494,6 +462,66 @@ func TestSync(t *testing.T) {
 		}
 		if got != "running" {
 			t.Errorf("got %q, want running (future JSONL entries should trigger transition)", got)
+		}
+	})
+
+	t.Run("waiting becomes running even when entries were already scanned", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		// Session starts as running
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// Step 1: Write JSONL entries and sync while session is running.
+		// These entries are scanned and would have been recorded into the DB in the old implementation.
+		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
+			`{"uuid":"uuid-1","timestamp":"2000-01-01T00:00:01.000Z"}`+"\n")
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+			t.Fatal(err)
+		}
+
+		// Step 2: PermissionRequest hook fires → status = waiting, updated_at = now
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// Step 3: User approves → Claude writes a new JSONL entry with a future timestamp
+		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
+			`{"uuid":"uuid-1","timestamp":"2000-01-01T00:00:01.000Z"}`+"\n"+
+				`{"uuid":"uuid-2","timestamp":"2099-01-01T00:00:01.000Z"}`+"\n")
+
+		// Step 4: Sync again — should detect the new entry's timestamp postdates updated_at
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "running" {
+			t.Errorf("got %q, want running (new entry after approval should trigger transition)", got)
 		}
 	})
 
@@ -1706,6 +1734,268 @@ func TestSyncCodex(t *testing.T) {
 		}
 		if got != "waiting" {
 			t.Errorf("got %q, want waiting (CAS should be no-op)", got)
+		}
+	})
+}
+
+func TestReadLastLines(t *testing.T) {
+	t.Parallel()
+
+	t.Run("fewer than N lines returns all", func(t *testing.T) {
+		t.Parallel()
+		f := filepath.Join(t.TempDir(), "few.txt")
+		if err := os.WriteFile(f, []byte("line1\nline2\nline3\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		lines, err := readLastLines(f, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(lines) != 3 {
+			t.Fatalf("got %d lines, want 3", len(lines))
+		}
+		if lines[0] != "line1" || lines[1] != "line2" || lines[2] != "line3" {
+			t.Errorf("got %v, want [line1 line2 line3]", lines)
+		}
+	})
+
+	t.Run("more than N lines returns last N", func(t *testing.T) {
+		t.Parallel()
+		var content strings.Builder
+		for i := 1; i <= 20; i++ {
+			fmt.Fprintf(&content, "line%d\n", i)
+		}
+		f := filepath.Join(t.TempDir(), "many.txt")
+		if err := os.WriteFile(f, []byte(content.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		lines, err := readLastLines(f, 5)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(lines) != 5 {
+			t.Fatalf("got %d lines, want 5", len(lines))
+		}
+		for i, want := range []string{"line16", "line17", "line18", "line19", "line20"} {
+			if lines[i] != want {
+				t.Errorf("lines[%d] = %q, want %q", i, lines[i], want)
+			}
+		}
+	})
+
+	t.Run("trailing newline produces no empty entry", func(t *testing.T) {
+		t.Parallel()
+		f := filepath.Join(t.TempDir(), "trail.txt")
+		if err := os.WriteFile(f, []byte("a\nb\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		lines, err := readLastLines(f, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, l := range lines {
+			if l == "" {
+				t.Errorf("lines[%d] is empty", i)
+			}
+		}
+		if len(lines) != 2 {
+			t.Fatalf("got %d lines, want 2", len(lines))
+		}
+	})
+
+	t.Run("empty file returns empty slice", func(t *testing.T) {
+		t.Parallel()
+		f := filepath.Join(t.TempDir(), "empty.txt")
+		if err := os.WriteFile(f, []byte{}, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		lines, err := readLastLines(f, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(lines) != 0 {
+			t.Errorf("got %d lines, want 0", len(lines))
+		}
+	})
+
+	t.Run("nonexistent file returns IsNotExist error", func(t *testing.T) {
+		t.Parallel()
+		_, err := readLastLines(filepath.Join(t.TempDir(), "nope.txt"), 10)
+		if !os.IsNotExist(err) {
+			t.Errorf("expected IsNotExist, got %v", err)
+		}
+	})
+
+	t.Run("large line over 70KB", func(t *testing.T) {
+		t.Parallel()
+		big := strings.Repeat("X", 70*1024)
+		f := filepath.Join(t.TempDir(), "big.txt")
+		if err := os.WriteFile(f, []byte("first\n"+big+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		lines, err := readLastLines(f, 5)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(lines) != 2 {
+			t.Fatalf("got %d lines, want 2", len(lines))
+		}
+		if lines[1] != big {
+			t.Errorf("large line length = %d, want %d", len(lines[1]), len(big))
+		}
+	})
+
+	t.Run("file without trailing newline", func(t *testing.T) {
+		t.Parallel()
+		f := filepath.Join(t.TempDir(), "notrail.txt")
+		if err := os.WriteFile(f, []byte("a\nb\nc"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		lines, err := readLastLines(f, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(lines) != 3 {
+			t.Fatalf("got %d lines, want 3", len(lines))
+		}
+		if lines[2] != "c" {
+			t.Errorf("last line = %q, want %q", lines[2], "c")
+		}
+	})
+}
+
+func TestFindLastCodexStatus(t *testing.T) {
+	t.Parallel()
+
+	taskStarted := `{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"task_started","turn_id":"t1"}}}`
+	taskComplete := `{"ts":"2099-01-01T00:00:02.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"task_complete"}}}`
+	nonStatus := `{"ts":"2099-01-01T00:00:01.500Z","dir":"to_tui","kind":"some_other_event","payload":{}}`
+
+	t.Run("status event found among last lines", func(t *testing.T) {
+		t.Parallel()
+		f := filepath.Join(t.TempDir(), "log.jsonl")
+		if err := os.WriteFile(f, []byte(taskStarted+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		st, ts, err := findLastCodexStatus(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st != "running" {
+			t.Errorf("status = %q, want running", st)
+		}
+		if ts != "2099-01-01T00:00:01.000Z" {
+			t.Errorf("ts = %q, want 2099-01-01T00:00:01.000Z", ts)
+		}
+	})
+
+	t.Run("status event buried under many non-status lines", func(t *testing.T) {
+		t.Parallel()
+		var content strings.Builder
+		content.WriteString(taskStarted)
+		content.WriteString("\n")
+		for range 50 {
+			content.WriteString(nonStatus)
+			content.WriteString("\n")
+		}
+		f := filepath.Join(t.TempDir(), "log.jsonl")
+		if err := os.WriteFile(f, []byte(content.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		st, ts, err := findLastCodexStatus(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st != "running" {
+			t.Errorf("status = %q, want running", st)
+		}
+		if ts != "2099-01-01T00:00:01.000Z" {
+			t.Errorf("ts = %q, want 2099-01-01T00:00:01.000Z", ts)
+		}
+	})
+
+	t.Run("most recent status event wins", func(t *testing.T) {
+		t.Parallel()
+		var content strings.Builder
+		content.WriteString(taskStarted)
+		content.WriteString("\n")
+		for range 20 {
+			content.WriteString(nonStatus)
+			content.WriteString("\n")
+		}
+		content.WriteString(taskComplete)
+		content.WriteString("\n")
+		for range 20 {
+			content.WriteString(nonStatus)
+			content.WriteString("\n")
+		}
+		f := filepath.Join(t.TempDir(), "log.jsonl")
+		if err := os.WriteFile(f, []byte(content.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		st, ts, err := findLastCodexStatus(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st != "stopped" {
+			t.Errorf("status = %q, want stopped", st)
+		}
+		if ts != "2099-01-01T00:00:02.000Z" {
+			t.Errorf("ts = %q, want 2099-01-01T00:00:02.000Z", ts)
+		}
+	})
+
+	t.Run("empty file returns empty status", func(t *testing.T) {
+		t.Parallel()
+		f := filepath.Join(t.TempDir(), "empty.jsonl")
+		if err := os.WriteFile(f, []byte{}, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		st, _, err := findLastCodexStatus(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st != "" {
+			t.Errorf("status = %q, want empty", st)
+		}
+	})
+
+	t.Run("nonexistent file returns IsNotExist error", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := findLastCodexStatus(filepath.Join(t.TempDir(), "nope.jsonl"))
+		if !os.IsNotExist(err) {
+			t.Errorf("expected IsNotExist, got %v", err)
+		}
+	})
+
+	t.Run("no status events returns empty status", func(t *testing.T) {
+		t.Parallel()
+		var content strings.Builder
+		for range 30 {
+			content.WriteString(nonStatus)
+			content.WriteString("\n")
+		}
+		f := filepath.Join(t.TempDir(), "log.jsonl")
+		if err := os.WriteFile(f, []byte(content.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		st, _, err := findLastCodexStatus(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st != "" {
+			t.Errorf("status = %q, want empty", st)
 		}
 	})
 }

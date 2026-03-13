@@ -1869,3 +1869,133 @@ func TestReadLastLines(t *testing.T) {
 		}
 	})
 }
+
+func TestFindLastCodexStatus(t *testing.T) {
+	t.Parallel()
+
+	taskStarted := `{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"task_started","turn_id":"t1"}}}`
+	taskComplete := `{"ts":"2099-01-01T00:00:02.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"task_complete"}}}`
+	nonStatus := `{"ts":"2099-01-01T00:00:01.500Z","dir":"to_tui","kind":"some_other_event","payload":{}}`
+
+	t.Run("status event found among last lines", func(t *testing.T) {
+		t.Parallel()
+		f := filepath.Join(t.TempDir(), "log.jsonl")
+		if err := os.WriteFile(f, []byte(taskStarted+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		st, ts, err := findLastCodexStatus(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st != "running" {
+			t.Errorf("status = %q, want running", st)
+		}
+		if ts != "2099-01-01T00:00:01.000Z" {
+			t.Errorf("ts = %q, want 2099-01-01T00:00:01.000Z", ts)
+		}
+	})
+
+	t.Run("status event buried under many non-status lines", func(t *testing.T) {
+		t.Parallel()
+		var content strings.Builder
+		content.WriteString(taskStarted)
+		content.WriteString("\n")
+		for range 50 {
+			content.WriteString(nonStatus)
+			content.WriteString("\n")
+		}
+		f := filepath.Join(t.TempDir(), "log.jsonl")
+		if err := os.WriteFile(f, []byte(content.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		st, ts, err := findLastCodexStatus(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st != "running" {
+			t.Errorf("status = %q, want running", st)
+		}
+		if ts != "2099-01-01T00:00:01.000Z" {
+			t.Errorf("ts = %q, want 2099-01-01T00:00:01.000Z", ts)
+		}
+	})
+
+	t.Run("most recent status event wins", func(t *testing.T) {
+		t.Parallel()
+		var content strings.Builder
+		content.WriteString(taskStarted)
+		content.WriteString("\n")
+		for range 20 {
+			content.WriteString(nonStatus)
+			content.WriteString("\n")
+		}
+		content.WriteString(taskComplete)
+		content.WriteString("\n")
+		for range 20 {
+			content.WriteString(nonStatus)
+			content.WriteString("\n")
+		}
+		f := filepath.Join(t.TempDir(), "log.jsonl")
+		if err := os.WriteFile(f, []byte(content.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		st, ts, err := findLastCodexStatus(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st != "stopped" {
+			t.Errorf("status = %q, want stopped", st)
+		}
+		if ts != "2099-01-01T00:00:02.000Z" {
+			t.Errorf("ts = %q, want 2099-01-01T00:00:02.000Z", ts)
+		}
+	})
+
+	t.Run("empty file returns empty status", func(t *testing.T) {
+		t.Parallel()
+		f := filepath.Join(t.TempDir(), "empty.jsonl")
+		if err := os.WriteFile(f, []byte{}, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		st, _, err := findLastCodexStatus(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st != "" {
+			t.Errorf("status = %q, want empty", st)
+		}
+	})
+
+	t.Run("nonexistent file returns IsNotExist error", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := findLastCodexStatus(filepath.Join(t.TempDir(), "nope.jsonl"))
+		if !os.IsNotExist(err) {
+			t.Errorf("expected IsNotExist, got %v", err)
+		}
+	})
+
+	t.Run("no status events returns empty status", func(t *testing.T) {
+		t.Parallel()
+		var content strings.Builder
+		for range 30 {
+			content.WriteString(nonStatus)
+			content.WriteString("\n")
+		}
+		f := filepath.Join(t.TempDir(), "log.jsonl")
+		if err := os.WriteFile(f, []byte(content.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		st, _, err := findLastCodexStatus(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st != "" {
+			t.Errorf("status = %q, want empty", st)
+		}
+	})
+}

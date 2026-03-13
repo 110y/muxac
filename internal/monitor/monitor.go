@@ -362,28 +362,85 @@ func codexEventToStatus(line codexLogLine) (status.Status, bool) {
 	return "", false
 }
 
+// findLastCodexStatus reads the file backward in chunks and returns the most
+// recent status-relevant Codex event. It stops as soon as a status event is
+// found, avoiding a full file scan. Returns os.IsNotExist errors as-is.
+func findLastCodexStatus(filePath string) (status.Status, string, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", "", err
+	}
+	defer f.Close()
+
+	size, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return "", "", fmt.Errorf("seek end %q: %w", filePath, err)
+	}
+	if size == 0 {
+		return "", "", nil
+	}
+
+	const chunkSize = 8192
+	var remainder []byte
+	offset := size
+
+	for offset > 0 {
+		readSize := min(int64(chunkSize), offset)
+		offset -= readSize
+
+		chunk := make([]byte, readSize)
+		if _, err := f.ReadAt(chunk, offset); err != nil && err != io.EOF {
+			return "", "", fmt.Errorf("read chunk %q: %w", filePath, err)
+		}
+
+		data := append(chunk, remainder...)
+		parts := strings.Split(string(data), "\n")
+
+		// First element may be a partial line unless we reached BOF.
+		if offset > 0 {
+			remainder = []byte(parts[0])
+			parts = parts[1:]
+		} else {
+			remainder = nil
+		}
+
+		// Scan from newest (end) to oldest (start).
+		for i := len(parts) - 1; i >= 0; i-- {
+			if parts[i] == "" {
+				continue
+			}
+			var cl codexLogLine
+			if json.Unmarshal([]byte(parts[i]), &cl) != nil {
+				continue
+			}
+			if st, ok := codexEventToStatus(cl); ok {
+				return st, cl.Ts, nil
+			}
+		}
+	}
+
+	// Process any remaining partial line from the very beginning.
+	if len(remainder) > 0 {
+		var cl codexLogLine
+		if json.Unmarshal(remainder, &cl) == nil {
+			if st, ok := codexEventToStatus(cl); ok {
+				return st, cl.Ts, nil
+			}
+		}
+	}
+
+	return "", "", nil
+}
+
 func syncCodexSession(ctx context.Context, queries *sqlc.Queries, cacheDir string, sess sqlc.ListSessionsRow, tmuxName string) error {
 	logPath := agent.CodexSessionLogPath(cacheDir, tmuxName)
 
-	lines, err := readLastLines(logPath, 10)
+	lastStatus, lastTs, err := findLastCodexStatus(logPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return fmt.Errorf("read codex session log tail %q: %w", logPath, err)
-	}
-
-	var lastStatus status.Status
-	var lastTs string
-	for _, raw := range lines {
-		var line codexLogLine
-		if json.Unmarshal([]byte(raw), &line) != nil {
-			continue
-		}
-		if st, ok := codexEventToStatus(line); ok {
-			lastStatus = st
-			lastTs = line.Ts
-		}
+		return fmt.Errorf("read codex session log %q: %w", logPath, err)
 	}
 
 	if lastStatus == "" {

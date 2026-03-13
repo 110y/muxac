@@ -1,7 +1,6 @@
 package monitor
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -366,32 +365,25 @@ func codexEventToStatus(line codexLogLine) (status.Status, bool) {
 func syncCodexSession(ctx context.Context, queries *sqlc.Queries, cacheDir string, sess sqlc.ListSessionsRow, tmuxName string) error {
 	logPath := agent.CodexSessionLogPath(cacheDir, tmuxName)
 
-	f, err := os.Open(logPath)
+	lines, err := readLastLines(logPath, 10)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return fmt.Errorf("open codex session log %q: %w", logPath, err)
+		return fmt.Errorf("read codex session log tail %q: %w", logPath, err)
 	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 
 	var lastStatus status.Status
 	var lastTs string
-	for scanner.Scan() {
+	for _, raw := range lines {
 		var line codexLogLine
-		if json.Unmarshal(scanner.Bytes(), &line) != nil {
+		if json.Unmarshal([]byte(raw), &line) != nil {
 			continue
 		}
 		if st, ok := codexEventToStatus(line); ok {
 			lastStatus = st
 			lastTs = line.Ts
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scan codex session log %q: %w", logPath, err)
 	}
 
 	if lastStatus == "" {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -175,6 +176,67 @@ func syncSession(ctx context.Context, queries *sqlc.Queries, homeDir, cacheDir s
 	return nil
 }
 
+// readLastLines reads the last n non-empty lines from a file by seeking
+// backward from the end in chunks. It returns os.IsNotExist errors as-is.
+func readLastLines(filePath string, n int) ([]string, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	size, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, fmt.Errorf("seek end %q: %w", filePath, err)
+	}
+	if size == 0 {
+		return nil, nil
+	}
+
+	const chunkSize = 8192
+	var buf []byte
+	offset := size
+	needed := n + 1 // need n+1 newlines to delimit n lines
+
+	for offset > 0 {
+		readSize := min(int64(chunkSize), offset)
+		offset -= readSize
+
+		chunk := make([]byte, readSize)
+		if _, err := f.ReadAt(chunk, offset); err != nil && err != io.EOF {
+			return nil, fmt.Errorf("read chunk %q: %w", filePath, err)
+		}
+
+		buf = append(chunk, buf...)
+
+		count := 0
+		for _, b := range buf {
+			if b == '\n' {
+				count++
+			}
+		}
+		if count >= needed {
+			break
+		}
+	}
+
+	lines := strings.Split(string(buf), "\n")
+
+	// Filter empty strings (from leading/trailing newlines).
+	result := make([]string, 0, len(lines))
+	for _, l := range lines {
+		if l != "" {
+			result = append(result, l)
+		}
+	}
+
+	if len(result) > n {
+		result = result[len(result)-n:]
+	}
+
+	return result, nil
+}
+
 func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir string, sess sqlc.ListSessionsRow) error {
 	if sess.AgentSessionID == "" {
 		return nil
@@ -185,31 +247,25 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 		return nil
 	}
 
-	f, err := os.Open(jsonlPath)
+	lines, err := readLastLines(jsonlPath, 10)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return fmt.Errorf("open jsonl %q: %w", jsonlPath, err)
+		return fmt.Errorf("read jsonl tail %q: %w", jsonlPath, err)
 	}
-	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	var lastLine jsonlLine
 	var maxTimestamp string
-	for scanner.Scan() {
+	for _, raw := range lines {
 		var line jsonlLine
-		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+		if err := json.Unmarshal([]byte(raw), &line); err != nil {
 			continue
 		}
 		lastLine = line
 		if line.Timestamp != "" && (maxTimestamp == "" || isAfter(line.Timestamp, maxTimestamp)) {
 			maxTimestamp = line.Timestamp
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scan jsonl %q: %w", jsonlPath, err)
 	}
 
 	// Interruption check takes priority over waiting→running.

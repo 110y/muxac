@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -1733,6 +1734,138 @@ func TestSyncCodex(t *testing.T) {
 		}
 		if got != "waiting" {
 			t.Errorf("got %q, want waiting (CAS should be no-op)", got)
+		}
+	})
+}
+
+func TestReadLastLines(t *testing.T) {
+	t.Parallel()
+
+	t.Run("fewer than N lines returns all", func(t *testing.T) {
+		t.Parallel()
+		f := filepath.Join(t.TempDir(), "few.txt")
+		if err := os.WriteFile(f, []byte("line1\nline2\nline3\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		lines, err := readLastLines(f, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(lines) != 3 {
+			t.Fatalf("got %d lines, want 3", len(lines))
+		}
+		if lines[0] != "line1" || lines[1] != "line2" || lines[2] != "line3" {
+			t.Errorf("got %v, want [line1 line2 line3]", lines)
+		}
+	})
+
+	t.Run("more than N lines returns last N", func(t *testing.T) {
+		t.Parallel()
+		var content strings.Builder
+		for i := 1; i <= 20; i++ {
+			fmt.Fprintf(&content, "line%d\n", i)
+		}
+		f := filepath.Join(t.TempDir(), "many.txt")
+		if err := os.WriteFile(f, []byte(content.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		lines, err := readLastLines(f, 5)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(lines) != 5 {
+			t.Fatalf("got %d lines, want 5", len(lines))
+		}
+		for i, want := range []string{"line16", "line17", "line18", "line19", "line20"} {
+			if lines[i] != want {
+				t.Errorf("lines[%d] = %q, want %q", i, lines[i], want)
+			}
+		}
+	})
+
+	t.Run("trailing newline produces no empty entry", func(t *testing.T) {
+		t.Parallel()
+		f := filepath.Join(t.TempDir(), "trail.txt")
+		if err := os.WriteFile(f, []byte("a\nb\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		lines, err := readLastLines(f, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, l := range lines {
+			if l == "" {
+				t.Errorf("lines[%d] is empty", i)
+			}
+		}
+		if len(lines) != 2 {
+			t.Fatalf("got %d lines, want 2", len(lines))
+		}
+	})
+
+	t.Run("empty file returns empty slice", func(t *testing.T) {
+		t.Parallel()
+		f := filepath.Join(t.TempDir(), "empty.txt")
+		if err := os.WriteFile(f, []byte{}, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		lines, err := readLastLines(f, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(lines) != 0 {
+			t.Errorf("got %d lines, want 0", len(lines))
+		}
+	})
+
+	t.Run("nonexistent file returns IsNotExist error", func(t *testing.T) {
+		t.Parallel()
+		_, err := readLastLines(filepath.Join(t.TempDir(), "nope.txt"), 10)
+		if !os.IsNotExist(err) {
+			t.Errorf("expected IsNotExist, got %v", err)
+		}
+	})
+
+	t.Run("large line over 70KB", func(t *testing.T) {
+		t.Parallel()
+		big := strings.Repeat("X", 70*1024)
+		f := filepath.Join(t.TempDir(), "big.txt")
+		if err := os.WriteFile(f, []byte("first\n"+big+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		lines, err := readLastLines(f, 5)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(lines) != 2 {
+			t.Fatalf("got %d lines, want 2", len(lines))
+		}
+		if lines[1] != big {
+			t.Errorf("large line length = %d, want %d", len(lines[1]), len(big))
+		}
+	})
+
+	t.Run("file without trailing newline", func(t *testing.T) {
+		t.Parallel()
+		f := filepath.Join(t.TempDir(), "notrail.txt")
+		if err := os.WriteFile(f, []byte("a\nb\nc"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		lines, err := readLastLines(f, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(lines) != 3 {
+			t.Fatalf("got %d lines, want 3", len(lines))
+		}
+		if lines[2] != "c" {
+			t.Errorf("last line = %q, want %q", lines[2], "c")
 		}
 	})
 }

@@ -164,16 +164,22 @@ func syncSession(ctx context.Context, queries *sqlc.Queries, homeDir, cacheDir s
 		}
 	}
 
-	if tool == agent.Codex {
+	switch tool {
+	case agent.Codex:
 		return syncCodexSession(ctx, queries, cacheDir, sess, tmuxName)
+	case agent.Claude:
+		return syncClaudeCodeSession(ctx, queries, homeDir, sess)
+	default:
+		return nil
 	}
+}
 
-	// Claude logic: require agent_session_id.
+func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir string, sess sqlc.ListSessionsRow) error {
 	if sess.AgentSessionID == "" {
 		return nil
 	}
 
-	jsonlPath := agent.JsonlPath(tool, homeDir, sess.Path, sess.AgentSessionID)
+	jsonlPath := agent.JsonlPath(agent.Claude, homeDir, sess.Path, sess.AgentSessionID)
 	if jsonlPath == "" {
 		return nil
 	}

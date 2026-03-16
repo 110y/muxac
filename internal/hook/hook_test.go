@@ -100,6 +100,74 @@ func TestRun(t *testing.T) {
 			wantPath:    "/home/user/project",
 			wantStatus:  "running",
 		},
+		{
+			name:        "Gemini BeforeAgent writes running",
+			input:       `{"hook_event_name": "BeforeAgent"}`,
+			sessionName: "default",
+			projectDir:  "/home/user/project",
+			tool:        agent.Gemini,
+			wantName:    "default",
+			wantPath:    "/home/user/project",
+			wantStatus:  "running",
+		},
+		{
+			name:        "Gemini BeforeTool writes running",
+			input:       `{"hook_event_name": "BeforeTool"}`,
+			sessionName: "default",
+			projectDir:  "/home/user/project",
+			tool:        agent.Gemini,
+			wantName:    "default",
+			wantPath:    "/home/user/project",
+			wantStatus:  "running",
+		},
+		{
+			name:        "Gemini AfterAgent writes stopped",
+			input:       `{"hook_event_name": "AfterAgent"}`,
+			sessionName: "default",
+			projectDir:  "/home/user/project",
+			tool:        agent.Gemini,
+			wantName:    "default",
+			wantPath:    "/home/user/project",
+			wantStatus:  "stopped",
+		},
+		{
+			name:        "Gemini Notification ToolPermission writes waiting",
+			input:       `{"hook_event_name": "Notification", "notification_type": "ToolPermission"}`,
+			sessionName: "default",
+			projectDir:  "/home/user/project",
+			tool:        agent.Gemini,
+			wantName:    "default",
+			wantPath:    "/home/user/project",
+			wantStatus:  "waiting",
+		},
+		{
+			name:        "Gemini SessionStart writes stopped",
+			input:       `{"hook_event_name": "SessionStart"}`,
+			sessionName: "default",
+			projectDir:  "/home/user/project",
+			tool:        agent.Gemini,
+			wantName:    "default",
+			wantPath:    "/home/user/project",
+			wantStatus:  "stopped",
+		},
+		{
+			name:        "Gemini SessionEnd writes stopped",
+			input:       `{"hook_event_name": "SessionEnd"}`,
+			sessionName: "default",
+			projectDir:  "/home/user/project",
+			tool:        agent.Gemini,
+			wantName:    "default",
+			wantPath:    "/home/user/project",
+			wantStatus:  "stopped",
+		},
+		{
+			name:        "Gemini Notification non-ToolPermission is no-op",
+			input:       `{"hook_event_name": "Notification", "notification_type": "SomethingElse"}`,
+			sessionName: "default",
+			projectDir:  "/home/user/project",
+			tool:        agent.Gemini,
+			wantNoop:    true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -261,6 +329,106 @@ func TestRunWithCurrentState(t *testing.T) {
 				t.Errorf("status = %q, want %q", got, tt.wantStatus)
 			}
 		})
+	}
+}
+
+func TestRunWithCurrentState_Gemini(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		initialStatus string
+		input         string
+		wantStatus    string
+	}{
+		{
+			name:          "waiting + BeforeTool becomes running",
+			initialStatus: "waiting",
+			input:         `{"hook_event_name": "BeforeTool"}`,
+			wantStatus:    "running",
+		},
+		{
+			name:          "waiting + AfterAgent becomes stopped",
+			initialStatus: "waiting",
+			input:         `{"hook_event_name": "AfterAgent"}`,
+			wantStatus:    "stopped",
+		},
+		{
+			name:          "stopped + BeforeAgent becomes running",
+			initialStatus: "stopped",
+			input:         `{"hook_event_name": "BeforeAgent"}`,
+			wantStatus:    "running",
+		},
+		{
+			name:          "running + Notification ToolPermission becomes waiting",
+			initialStatus: "running",
+			input:         `{"hook_event_name": "Notification", "notification_type": "ToolPermission"}`,
+			wantStatus:    "waiting",
+		},
+		{
+			name:          "running + AfterAgent becomes stopped",
+			initialStatus: "running",
+			input:         `{"hook_event_name": "AfterAgent"}`,
+			wantStatus:    "stopped",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			queries := database.SetupTestDB(t)
+
+			if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+				Name: "default", Path: "/project", Status: tt.initialStatus, UpdatedAt: timestamp.Now(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			r := strings.NewReader(tt.input)
+			if err := hook.Run(ctx, r, queries, "default", "/project", agent.Gemini); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+				Name: "default", Path: "/project",
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.wantStatus {
+				t.Errorf("status = %q, want %q", got, tt.wantStatus)
+			}
+		})
+	}
+}
+
+func TestRunSessionStart_SavesAgentTool_Gemini(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	queries := database.SetupTestDB(t)
+
+	if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+		Name: "default", Path: "/project", Status: "running", UpdatedAt: timestamp.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	r := strings.NewReader(`{"hook_event_name": "SessionStart", "session_id": "gem-456"}`)
+	if err := hook.Run(ctx, r, queries, "default", "/project", agent.Gemini); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sessions, err := queries.ListSessions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].AgentTool != "gemini" {
+		t.Errorf("agent_tool = %q, want %q", sessions[0].AgentTool, "gemini")
 	}
 }
 

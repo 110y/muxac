@@ -951,6 +951,192 @@ func writeCodexLog(t *testing.T, cacheDir, content string) {
 	}
 }
 
+func TestSyncGemini_NoFileSyncNeeded(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	cacheDir := t.TempDir()
+	ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
+	queries := database.SetupTestDB(t)
+	homeDir := t.TempDir()
+
+	if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+		Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+		AgentTool: "gemini", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sessions, err := queries.ListSessions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].Status != "running" {
+		t.Errorf("status = %q, want %q (should not be changed by file-based sync)", sessions[0].Status, "running")
+	}
+}
+
+// writeGeminiSession creates a Gemini session JSON file matching the expected glob pattern.
+func writeGeminiSession(t *testing.T, homeDir, projectDir, sessionID, content string) {
+	t.Helper()
+	dir := filepath.Join(homeDir, ".gemini", "tmp", filepath.Base(projectDir), "chats")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	filename := fmt.Sprintf("session-001-%s.json", sessionID[:8])
+	if err := os.WriteFile(filepath.Join(dir, filename), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSyncGemini_CancellationDetected(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	cacheDir := t.TempDir()
+	ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
+	queries := database.SetupTestDB(t)
+	homeDir := t.TempDir()
+
+	oldTime := time.Now().Add(-1 * time.Minute).UTC().Format(timestamp.Format)
+	if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+		Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: oldTime,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+		AgentTool: "gemini", UpdatedAt: oldTime, Name: "default", Path: "/home/user/project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+		AgentSessionID: "abcdefgh-1234", UpdatedAt: oldTime, Name: "default", Path: "/home/user/project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cancelTime := time.Now().UTC().Format(time.RFC3339Nano)
+	sessionContent := fmt.Sprintf(`{"messages":[{"type":"gemini","timestamp":"%s","content":"some output"},{"type":"info","timestamp":"%s","content":"Request cancelled."}]}`, oldTime, cancelTime)
+	writeGeminiSession(t, homeDir, "/home/user/project", "abcdefgh-1234", sessionContent)
+
+	if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sessions, err := queries.ListSessions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].Status != "stopped" {
+		t.Errorf("status = %q, want %q", sessions[0].Status, "stopped")
+	}
+}
+
+func TestSyncGemini_NoCancellation_StatusUnchanged(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	cacheDir := t.TempDir()
+	ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
+	queries := database.SetupTestDB(t)
+	homeDir := t.TempDir()
+
+	oldTime := time.Now().Add(-1 * time.Minute).UTC().Format(timestamp.Format)
+	if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+		Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: oldTime,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+		AgentTool: "gemini", UpdatedAt: oldTime, Name: "default", Path: "/home/user/project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+		AgentSessionID: "abcdefgh-1234", UpdatedAt: oldTime, Name: "default", Path: "/home/user/project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionContent := `{"messages":[{"type":"gemini","timestamp":"2025-01-01T00:00:00Z","content":"some output"}]}`
+	writeGeminiSession(t, homeDir, "/home/user/project", "abcdefgh-1234", sessionContent)
+
+	if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sessions, err := queries.ListSessions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].Status != "running" {
+		t.Errorf("status = %q, want %q", sessions[0].Status, "running")
+	}
+}
+
+func TestSyncGemini_OldCancellation_StatusUnchanged(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	cacheDir := t.TempDir()
+	ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
+	queries := database.SetupTestDB(t)
+	homeDir := t.TempDir()
+
+	recentTime := time.Now().UTC().Format(timestamp.Format)
+	if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+		Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: recentTime,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+		AgentTool: "gemini", UpdatedAt: recentTime, Name: "default", Path: "/home/user/project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+		AgentSessionID: "abcdefgh-1234", UpdatedAt: recentTime, Name: "default", Path: "/home/user/project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	oldCancelTime := time.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339Nano)
+	sessionContent := fmt.Sprintf(`{"messages":[{"type":"info","timestamp":"%s","content":"Request cancelled."}]}`, oldCancelTime)
+	writeGeminiSession(t, homeDir, "/home/user/project", "abcdefgh-1234", sessionContent)
+
+	if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sessions, err := queries.ListSessions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].Status != "running" {
+		t.Errorf("status = %q, want %q", sessions[0].Status, "running")
+	}
+}
+
 func TestSyncCodex(t *testing.T) {
 	t.Parallel()
 

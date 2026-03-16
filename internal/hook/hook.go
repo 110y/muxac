@@ -14,8 +14,9 @@ import (
 )
 
 type hookInput struct {
-	HookEventName string `json:"hook_event_name"`
-	SessionID     string `json:"session_id"`
+	HookEventName    string `json:"hook_event_name"`
+	SessionID        string `json:"session_id"`
+	NotificationType string `json:"notification_type"`
 }
 
 // Run reads a hook event from r and upserts the corresponding session status in the database.
@@ -30,7 +31,12 @@ func Run(ctx context.Context, r io.Reader, queries *sqlc.Queries, sessionName, p
 		return err
 	}
 
-	event := agent.NormalizeEvent(tool, input.HookEventName)
+	eventName := input.HookEventName
+	if eventName == "Notification" && input.NotificationType == "ToolPermission" {
+		eventName = "PermissionRequest"
+	}
+
+	event := agent.NormalizeEvent(tool, eventName)
 
 	target, ok := status.FromEvent(event)
 	if !ok {
@@ -53,7 +59,7 @@ func Run(ctx context.Context, r io.Reader, queries *sqlc.Queries, sessionName, p
 		current = status.Status(currentStr)
 	}
 
-	if !status.IsValidTransition(current, event) {
+	if tool != agent.Gemini && !status.IsValidTransition(current, event) {
 		return nil
 	}
 

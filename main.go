@@ -301,8 +301,10 @@ Reads a JSON hook event from stdin.
 
 Required environment variables:
   MUXAC_SESSION_NAME    The tmux session name
-  GEMINI_PROJECT_DIR    The project directory for Gemini CLI detection
-  CLAUDE_PROJECT_DIR    The project directory for Claude Code detection
+
+Tool detection environment variables (at least one must be set):
+  GEMINI_PROJECT_DIR    Set by Gemini CLI hooks
+  CLAUDE_PROJECT_DIR    Set by Claude Code hooks
 
 Options:
   --help, -h    Show this help message`)

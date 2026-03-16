@@ -353,7 +353,21 @@ func syncGeminiSession(ctx context.Context, queries *sqlc.Queries, homeDir strin
 		return nil
 	}
 
+	// Pick the most recently modified file when multiple matches exist.
 	sessionFile := matches[0]
+	if len(matches) > 1 {
+		var newest time.Time
+		for _, m := range matches {
+			fi, err := os.Stat(m)
+			if err != nil {
+				continue
+			}
+			if fi.ModTime().After(newest) {
+				newest = fi.ModTime()
+				sessionFile = m
+			}
+		}
+	}
 	tail, err := readTail(sessionFile, 4096)
 	if err != nil {
 		if os.IsNotExist(err) {

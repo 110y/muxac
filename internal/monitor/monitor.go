@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -168,6 +169,8 @@ func syncSession(ctx context.Context, queries *sqlc.Queries, homeDir, cacheDir s
 		return syncCodexSession(ctx, queries, cacheDir, sess, tmuxName)
 	case agent.Claude:
 		return syncClaudeCodeSession(ctx, queries, homeDir, sess)
+	case agent.Gemini:
+		return syncGeminiSession(ctx, queries, homeDir, sess)
 	case agent.Unknown:
 		return nil
 	}
@@ -298,6 +301,124 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 	}
 
 	return nil
+}
+
+// readTail reads the last n bytes from a file. If the file is smaller than n,
+// the entire file is returned.
+func readTail(filePath string, n int64) ([]byte, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	size, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, fmt.Errorf("seek end %q: %w", filePath, err)
+	}
+	if size == 0 {
+		return nil, nil
+	}
+
+	readSize := min(n, size)
+	offset := size - readSize
+	buf := make([]byte, readSize)
+	if _, err := f.ReadAt(buf, offset); err != nil && err != io.EOF {
+		return nil, fmt.Errorf("read tail %q: %w", filePath, err)
+	}
+	return buf, nil
+}
+
+type geminiInfoMessage struct {
+	Timestamp string `json:"timestamp"`
+	Type      string `json:"type"`
+	Content   string `json:"content"`
+}
+
+func syncGeminiSession(ctx context.Context, queries *sqlc.Queries, homeDir string, sess sqlc.ListSessionsRow) error {
+	if sess.AgentSessionID == "" {
+		return nil
+	}
+
+	pattern := agent.GeminiSessionFilePattern(homeDir, sess.Path, sess.AgentSessionID)
+	if pattern == "" {
+		return nil
+	}
+
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return fmt.Errorf("glob gemini session %q: %w", pattern, err)
+	}
+	if len(matches) == 0 {
+		return nil
+	}
+
+	// Pick the most recently modified file when multiple matches exist.
+	sessionFile := matches[0]
+	if len(matches) > 1 {
+		var newest time.Time
+		for _, m := range matches {
+			fi, err := os.Stat(m)
+			if err != nil {
+				continue
+			}
+			if fi.ModTime().After(newest) {
+				newest = fi.ModTime()
+				sessionFile = m
+			}
+		}
+	}
+	tail, err := readTail(sessionFile, 4096)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read gemini session tail %q: %w", sessionFile, err)
+	}
+
+	const marker = `"Request cancelled."`
+	chunk := string(tail)
+	idx := strings.LastIndex(chunk, marker)
+	if idx < 0 {
+		return nil
+	}
+
+	// Extract the enclosing JSON object {...} around the marker.
+	start := strings.LastIndex(chunk[:idx], "{")
+	if start < 0 {
+		return nil
+	}
+	end := strings.Index(chunk[idx:], "}")
+	if end < 0 {
+		return nil
+	}
+	objStr := chunk[start : idx+end+1]
+
+	var msg geminiInfoMessage
+	if err := json.Unmarshal([]byte(objStr), &msg); err != nil {
+		return nil
+	}
+
+	if msg.Timestamp == "" {
+		return nil
+	}
+
+	if !isAfter(msg.Timestamp, sess.UpdatedAt) {
+		return nil
+	}
+
+	st := status.Status(sess.Status)
+	if st != status.Running && st != status.Waiting {
+		return nil
+	}
+
+	return queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
+		Status:    string(status.Stopped),
+		UpdatedAt: timestamp.Now(),
+		Name:      sess.Name,
+		Path:      sess.Path,
+		Status_2:  string(st),
+	})
 }
 
 type codexLogLine struct {

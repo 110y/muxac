@@ -217,14 +217,15 @@ func run() error {
 		}
 		sessionName := os.Getenv(agent.EnvSessionName)
 		if sessionName == "" {
-			return fmt.Errorf("%s is not set", agent.EnvSessionName)
+			return nil
 		}
+		geminiProjectDir := os.Getenv("GEMINI_PROJECT_DIR")
 		claudeProjectDir := os.Getenv("CLAUDE_PROJECT_DIR")
-		tool := agent.DetectTool(claudeProjectDir)
+		tool := agent.DetectTool(geminiProjectDir, claudeProjectDir)
 		if tool == agent.Unknown {
-			return fmt.Errorf("unknown agentic coding tool")
+			return nil
 		}
-		projectDir := agent.ProjectDir(tool, claudeProjectDir)
+		projectDir := agent.ProjectDir(tool, geminiProjectDir, claudeProjectDir)
 		if err := monitor.EnsureRunning(ctx, tmuxRunner, queries); err != nil {
 			return err
 		}
@@ -300,7 +301,10 @@ Reads a JSON hook event from stdin.
 
 Required environment variables:
   MUXAC_SESSION_NAME    The tmux session name
-  CLAUDE_PROJECT_DIR    The project directory for tool detection
+
+Tool detection environment variables (at least one must be set):
+  GEMINI_PROJECT_DIR    Set by Gemini CLI hooks
+  CLAUDE_PROJECT_DIR    Set by Claude Code hooks
 
 Options:
   --help, -h    Show this help message`)

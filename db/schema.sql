@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     path               TEXT NOT NULL,
     status             TEXT NOT NULL CHECK (status IN ('running', 'waiting', 'stopped', 'unknown')),
     agent_session_id   TEXT NOT NULL DEFAULT '',
-    agent_tool         TEXT NOT NULL DEFAULT '' CHECK (agent_tool IN ('', 'claude', 'codex')),
+    agent_tool         TEXT NOT NULL DEFAULT '' CHECK (agent_tool IN ('', 'claude', 'codex', 'gemini')),
     created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     PRIMARY KEY (path, name)

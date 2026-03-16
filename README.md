@@ -160,7 +160,83 @@ $ muxac new codex
 </details>
 
 <details>
-<summary>Gemini CLI (Not yet supported, coming soon...)</summary>
+<summary>Gemini CLI</summary>
+
+Add the following hook configuration to your Gemini CLI settings file (e.g. `~/.gemini/settings.json`):
+
+```json
+{
+  "hooks": {
+    "BeforeAgent": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "muxac hook"
+          }
+        ]
+      }
+    ],
+    "BeforeTool": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "muxac hook"
+          }
+        ]
+      }
+    ],
+    "AfterAgent": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "muxac hook"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "muxac hook"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "muxac hook"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "muxac hook"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
 </details>
 
 <details>

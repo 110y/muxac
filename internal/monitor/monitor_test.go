@@ -22,9 +22,11 @@ type detachedSessionCall struct {
 }
 
 type fakeTmux struct {
-	sessions         map[string]bool
-	killedSessions   []string
-	detachedSessions []detachedSessionCall
+	sessions           map[string]bool
+	killedSessions     []string
+	detachedSessions   []detachedSessionCall
+	capturePaneOutputs map[string]string
+	capturePaneErr     error
 }
 
 func newFakeTmux() *fakeTmux {
@@ -66,6 +68,17 @@ func (f *fakeTmux) NewDetachedSession(_ context.Context, sessionName string, com
 	return nil
 }
 
+func (f *fakeTmux) CapturePane(_ context.Context, sessionName string) (string, error) {
+	if f.capturePaneErr != nil {
+		return "", f.capturePaneErr
+	}
+	return f.capturePaneOutputs[sessionName], nil
+}
+
+func newMonitorState() *monitorState {
+	return &monitorState{capturePaneClearCount: make(map[string]int)}
+}
+
 // writeJSONL creates a JSONL file at the Claude project path for the given session.
 func writeJSONL(t *testing.T, homeDir, projectPath, sessionID, content string) {
 	t.Helper()
@@ -96,7 +109,7 @@ func TestSync(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -137,7 +150,7 @@ func TestSync(t *testing.T) {
 			`{"uuid":"uuid-1","timestamp":"2099-01-01T00:00:01.000Z"}`+"\n")
 
 		// Sync: JSONL max timestamp postdates updated_at, transitions to running
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
@@ -179,12 +192,12 @@ func TestSync(t *testing.T) {
 			`{"uuid":"uuid-1","timestamp":"2099-01-01T00:00:01.000Z"}`+"\n")
 
 		// First sync: transitions to running
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
 		// Second sync: status is already running, the st == status.Waiting guard prevents re-triggering
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
@@ -222,7 +235,7 @@ func TestSync(t *testing.T) {
 		}
 
 		// First sync: baseline
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -231,7 +244,7 @@ func TestSync(t *testing.T) {
 			`{"uuid":"uuid-1","timestamp":"2025-01-01T00:00:01Z"}`+"\n")
 
 		// Second sync: new UUID but status is idle, should not transition
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
@@ -269,7 +282,7 @@ func TestSync(t *testing.T) {
 		}
 
 		// Sync without JSONL file: should not error or transition
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -298,7 +311,7 @@ func TestSync(t *testing.T) {
 		}
 		// No agent_session_id set
 
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -337,7 +350,7 @@ func TestSync(t *testing.T) {
 		}
 
 		// First sync: baseline with no JSONL
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -349,7 +362,7 @@ func TestSync(t *testing.T) {
 		normalLine := `{"uuid":"uuid-after","timestamp":"2099-01-01T00:00:02.000Z"}` + "\n"
 		writeJSONL(t, homeDir, "-home-dev-bigproj", "sess-big", largeLine+normalLine)
 
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -394,7 +407,7 @@ func TestSync(t *testing.T) {
 				`{"uuid":"uuid-new-but-old-ts","timestamp":"2000-01-01T00:00:02.000Z"}`+"\n")
 
 		// Sync: max timestamp predates updated_at, no transition
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -434,7 +447,7 @@ func TestSync(t *testing.T) {
 		}
 
 		// First sync: baseline with no JSONL
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -450,7 +463,7 @@ func TestSync(t *testing.T) {
 			`{"uuid":"uuid-future","timestamp":"2099-01-01T00:00:01.000Z"}`+"\n")
 
 		// Second sync: new UUID with future timestamp should transition to running
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -493,7 +506,7 @@ func TestSync(t *testing.T) {
 		// These entries are scanned and would have been recorded into the DB in the old implementation.
 		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
 			`{"uuid":"uuid-1","timestamp":"2000-01-01T00:00:01.000Z"}`+"\n")
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -510,7 +523,7 @@ func TestSync(t *testing.T) {
 				`{"uuid":"uuid-2","timestamp":"2099-01-01T00:00:01.000Z"}`+"\n")
 
 		// Step 4: Sync again — should detect the new entry's timestamp postdates updated_at
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -552,7 +565,7 @@ func TestSync(t *testing.T) {
 			`{"uuid":"uuid-1","timestamp":"2099-01-01T00:00:01.000Z"}`+"\n"+
 				`{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user at 2099-01-01]"}]},"timestamp":"2099-01-01T00:00:02.000Z"}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -593,7 +606,7 @@ func TestSync(t *testing.T) {
 		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
 			`{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user at 2099-01-01]"}]},"timestamp":"2099-01-01T00:00:01.000Z"}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -634,7 +647,7 @@ func TestSync(t *testing.T) {
 		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
 			`{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user at 2000-01-01]"}]},"timestamp":"2000-01-01T00:00:01.000Z"}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -680,7 +693,7 @@ func TestSync(t *testing.T) {
 			`{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]},"timestamp":"`+interruptTS+`"}`+"\n")
 
 		// First sync: transitions to idle
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
@@ -702,7 +715,7 @@ func TestSync(t *testing.T) {
 		}
 
 		// Second sync with same JSONL: should not re-trigger stop
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 		got, err = queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
@@ -744,7 +757,7 @@ func TestSync(t *testing.T) {
 			`{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user at 2099-01-01]"}]},"timestamp":"2099-01-01T00:00:01.000Z"}`+"\n"+
 				`{"uuid":"uuid-1","timestamp":"2099-01-01T00:00:02.000Z"}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -783,7 +796,7 @@ func TestSync(t *testing.T) {
 		}
 
 		// First sync: baseline with no JSONL
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -792,7 +805,7 @@ func TestSync(t *testing.T) {
 			`{"uuid":"uuid-1","timestamp":"2099-01-01T00:00:01.000Z"}`+"\n"+
 				`{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user at 2099-01-01]"}]},"timestamp":"2099-01-01T00:00:02.000Z"}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -830,7 +843,7 @@ func TestSync(t *testing.T) {
 		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
 			`{"uuid":"uuid-1","timestamp":"2099-01-01T00:00:01.000Z"}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -842,6 +855,258 @@ func TestSync(t *testing.T) {
 		}
 		if got != "waiting" {
 			t.Errorf("got %q, want waiting (unknown tool should skip JSONL processing)", got)
+		}
+	})
+
+	t.Run("waiting becomes running via capture-pane when prompt disappears", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		ft := &fakeTmux{
+			sessions:           map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{"muxac-default@home@user@project": "Some output\nProcessing files...\n"},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// No JSONL file — force capture-pane path
+		state := newMonitorState()
+
+		// First sync: prompt gone, counter=1 (debounce)
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), state); err != nil {
+			t.Fatal(err)
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "waiting" {
+			t.Fatalf("after first sync: got %q, want waiting (debounce)", got)
+		}
+
+		// Second sync: prompt still gone, counter=2 → transitions
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), state); err != nil {
+			t.Fatal(err)
+		}
+		got, err = queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "running" {
+			t.Errorf("after second sync: got %q, want running", got)
+		}
+	})
+
+	t.Run("waiting stays waiting when prompt is visible", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		ft := &fakeTmux{
+			sessions:           map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{"muxac-default@home@user@project": "Some output\n  Yes, allow once\n  Yes, allow always\n"},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		state := newMonitorState()
+		// Multiple syncs — prompt always visible
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), state); err != nil {
+			t.Fatal(err)
+		}
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), state); err != nil {
+			t.Fatal(err)
+		}
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), state); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "waiting" {
+			t.Errorf("got %q, want waiting (prompt is visible)", got)
+		}
+	})
+
+	t.Run("capture-pane debounce resets when prompt reappears", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		ft := &fakeTmux{
+			sessions:           map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{"muxac-default@home@user@project": "Processing...\n"},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		state := newMonitorState()
+
+		// First sync: prompt gone, counter=1
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), state); err != nil {
+			t.Fatal(err)
+		}
+
+		// Prompt reappears
+		ft.capturePaneOutputs["muxac-default@home@user@project"] = "Allow once\nAllow always\n"
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), state); err != nil {
+			t.Fatal(err)
+		}
+
+		// Prompt disappears again, counter=1 (reset)
+		ft.capturePaneOutputs["muxac-default@home@user@project"] = "Processing...\n"
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), state); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "waiting" {
+			t.Errorf("got %q, want waiting (debounce counter should have reset)", got)
+		}
+	})
+
+	t.Run("capture-pane error is non-fatal", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		ft := &fakeTmux{
+			sessions:       map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneErr: fmt.Errorf("tmux not responding"),
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		state := newMonitorState()
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), state); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "waiting" {
+			t.Errorf("got %q, want waiting (capture-pane error should be non-fatal)", got)
+		}
+	})
+
+	t.Run("JSONL transition takes priority over capture-pane", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		ft := &fakeTmux{
+			sessions: map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{
+				"muxac-default@home@user@project": "  Yes, allow once\n  Yes, allow always\n",
+			},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// JSONL has a future timestamp → transitions even if capture-pane shows prompt
+		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
+			`{"uuid":"uuid-1","timestamp":"2099-01-01T00:00:01.000Z"}`+"\n")
+
+		if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "running" {
+			t.Errorf("got %q, want running (JSONL transition should take priority)", got)
 		}
 	})
 
@@ -892,6 +1157,44 @@ func TestSync(t *testing.T) {
 	})
 }
 
+func TestTerminalShowsWaitingPrompt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{"yes allow once", "  Yes, allow once\n", true},
+		{"yes allow always", "  Yes, allow always\n", true},
+		{"allow once", "  Allow once\n", true},
+		{"allow always", "  Allow always\n", true},
+		{"no and tell claude", "  No, and tell Claude what to do differently\n", true},
+		{"do you want", "Do you want to proceed?\n", true},
+		{"would you like", "Would you like to continue?\n", true},
+		{"run this command?", "Run this command?\n", true},
+		{"execute this?", "Execute this?\n", true},
+		{"do you trust the files", "Do you trust the files in this folder?\n", true},
+		{"use arrow keys", "Use arrow keys to navigate\n", true},
+		{"esc to cancel", "Press Esc to cancel\n", true},
+		{"case insensitive", "YES, ALLOW ONCE\n", true},
+		{"non-breaking space normalization", "Yes,\u00a0allow\u00a0once\n", true},
+		{"pattern outside last 15 lines window", strings.Repeat("unrelated line\n", 20) + "Yes, allow once\n" + strings.Repeat("other line\n", 15), false},
+		{"empty output", "", false},
+		{"no matching patterns", "Processing files...\nReading data...\n", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := terminalShowsWaitingPrompt(tt.output)
+			if got != tt.want {
+				t.Errorf("terminalShowsWaitingPrompt() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSync_WritesHeartbeat(t *testing.T) {
 	t.Parallel()
 
@@ -900,7 +1203,7 @@ func TestSync_WritesHeartbeat(t *testing.T) {
 	queries := database.SetupTestDB(t)
 	homeDir := t.TempDir()
 
-	if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
+	if err := sync(ctx, ft, queries, homeDir, t.TempDir(), newMonitorState()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -971,7 +1274,7 @@ func TestSyncGemini_NoFileSyncNeeded(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+	if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -1030,7 +1333,7 @@ func TestSyncGemini_CancellationDetected(t *testing.T) {
 	sessionContent := fmt.Sprintf(`{"messages":[{"type":"gemini","timestamp":"%s","content":"some output"},{"type":"info","timestamp":"%s","content":"Request cancelled."}]}`, oldTime, cancelTime)
 	writeGeminiSession(t, homeDir, "/home/user/project", "abcdefgh-1234", sessionContent)
 
-	if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+	if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -1075,7 +1378,7 @@ func TestSyncGemini_NoCancellation_StatusUnchanged(t *testing.T) {
 	sessionContent := `{"messages":[{"type":"gemini","timestamp":"2025-01-01T00:00:00Z","content":"some output"}]}`
 	writeGeminiSession(t, homeDir, "/home/user/project", "abcdefgh-1234", sessionContent)
 
-	if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+	if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -1121,7 +1424,7 @@ func TestSyncGemini_OldCancellation_StatusUnchanged(t *testing.T) {
 	sessionContent := fmt.Sprintf(`{"messages":[{"type":"info","timestamp":"%s","content":"Request cancelled."}]}`, oldCancelTime)
 	writeGeminiSession(t, homeDir, "/home/user/project", "abcdefgh-1234", sessionContent)
 
-	if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+	if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -1162,7 +1465,7 @@ func TestSyncCodex(t *testing.T) {
 		writeCodexLog(t, cacheDir,
 			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"task_started","turn_id":"t1"}}}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1199,7 +1502,7 @@ func TestSyncCodex(t *testing.T) {
 		writeCodexLog(t, cacheDir,
 			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"task_complete","turn_id":"t1"}}}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1236,7 +1539,7 @@ func TestSyncCodex(t *testing.T) {
 		writeCodexLog(t, cacheDir,
 			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"exec_approval_request","call_id":"c1","command":"ls"}}}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1273,7 +1576,7 @@ func TestSyncCodex(t *testing.T) {
 		writeCodexLog(t, cacheDir,
 			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"apply_patch_approval_request","call_id":"c1","turn_id":"t1"}}}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1310,7 +1613,7 @@ func TestSyncCodex(t *testing.T) {
 		writeCodexLog(t, cacheDir,
 			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"request_permissions"}}}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1347,7 +1650,7 @@ func TestSyncCodex(t *testing.T) {
 		writeCodexLog(t, cacheDir,
 			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"request_user_input"}}}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1384,7 +1687,7 @@ func TestSyncCodex(t *testing.T) {
 		writeCodexLog(t, cacheDir,
 			`{"ts":"2099-01-01T00:00:01.000Z","dir":"from_tui","kind":"op","payload":{"type":"user_input","text":"hello"}}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1421,7 +1724,7 @@ func TestSyncCodex(t *testing.T) {
 		writeCodexLog(t, cacheDir,
 			`{"ts":"2099-01-01T00:00:01.000Z","dir":"from_tui","kind":"op","payload":{"type":"user_turn"}}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1458,7 +1761,7 @@ func TestSyncCodex(t *testing.T) {
 		writeCodexLog(t, cacheDir,
 			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"turn_aborted","turn_id":"t1"}}}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1495,7 +1798,7 @@ func TestSyncCodex(t *testing.T) {
 		writeCodexLog(t, cacheDir,
 			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"shutdown_complete"}}}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1535,7 +1838,7 @@ func TestSyncCodex(t *testing.T) {
 				`{"ts":"2099-01-01T00:00:02.000Z","dir":"from_tui","kind":"op","payload":{"type":"exec_approval","id":"c1","decision":"abort"}}`+"\n"+
 				`{"ts":"2099-01-01T00:00:03.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"turn_aborted","turn_id":"t1"}}}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1573,7 +1876,7 @@ func TestSyncCodex(t *testing.T) {
 			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"exec_approval_request","call_id":"c1","command":"ls"}}}`+"\n"+
 				`{"ts":"2099-01-01T00:00:02.000Z","dir":"from_tui","kind":"op","payload":{"type":"exec_approval","id":"c1","decision":"approved"}}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1611,7 +1914,7 @@ func TestSyncCodex(t *testing.T) {
 			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"exec_approval_request","call_id":"c1","command":"ls"}}}`+"\n"+
 				`{"ts":"2099-01-01T00:00:02.000Z","dir":"from_tui","kind":"op","payload":{"type":"exec_approval","id":"c1","decision":"abort"}}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1648,7 +1951,7 @@ func TestSyncCodex(t *testing.T) {
 		writeCodexLog(t, cacheDir,
 			`{"ts":"2099-01-01T00:00:01.000Z","dir":"from_tui","kind":"op","payload":{"type":"interrupt"}}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1685,7 +1988,7 @@ func TestSyncCodex(t *testing.T) {
 		writeCodexLog(t, cacheDir,
 			`{"ts":"2099-01-01T00:00:01.000Z","dir":"meta","kind":"session_end"}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1722,7 +2025,7 @@ func TestSyncCodex(t *testing.T) {
 		writeCodexLog(t, cacheDir,
 			`{"ts":"2000-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"task_started","turn_id":"t1"}}}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1760,7 +2063,7 @@ func TestSyncCodex(t *testing.T) {
 			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"task_started","turn_id":"t1"}}}`+"\n"+
 				`{"ts":"2099-01-01T00:00:02.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"exec_approval_request","call_id":"c1","command":"ls"}}}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1803,7 +2106,7 @@ func TestSyncCodex(t *testing.T) {
 		}
 
 		// tmux session is dead (not in ft.sessions)
-		if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1826,7 +2129,7 @@ func TestSyncCodex(t *testing.T) {
 			t.Fatal(err)
 		}
 		// No agent_tool set, no codex log → should not error
-		if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1858,7 +2161,7 @@ func TestSyncCodex(t *testing.T) {
 		writeCodexLog(t, cacheDir,
 			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"task_started","turn_id":"t1"}}}`+"\n")
 
-		if err := sync(ctx, ft, queries, homeDir, cacheDir); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 

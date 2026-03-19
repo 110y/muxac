@@ -62,6 +62,10 @@ func (f *fakeTmux) NewDetachedSession(_ context.Context, _ string, _ string) err
 	return nil
 }
 
+func (f *fakeTmux) CapturePane(_ context.Context, _ string) (string, error) {
+	return "", nil
+}
+
 func TestRun_NewSession(t *testing.T) {
 	t.Parallel()
 

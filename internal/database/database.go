@@ -122,6 +122,14 @@ func migrate(ctx context.Context, conn *sql.DB, migrations fs.FS) error {
 }
 
 func applyMigration(ctx context.Context, conn *sql.DB, f migrationFile, content []byte) error {
+	// Disable foreign keys before the transaction so that migrations can
+	// drop and recreate tables referenced by foreign keys.
+	// PRAGMA foreign_keys is a no-op inside a transaction.
+	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
+		return err
+	}
+	defer conn.ExecContext(ctx, "PRAGMA foreign_keys = ON") //nolint:errcheck // best-effort re-enable
+
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err

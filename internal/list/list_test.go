@@ -169,7 +169,7 @@ func TestRun(t *testing.T) {
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
 			Name:      "dead",
 			Path:      "/home/user/project2",
-			Status:    "stopped",
+			Status:    "idle",
 			UpdatedAt: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
@@ -197,7 +197,7 @@ func TestRun(t *testing.T) {
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
 			Name:      "default",
 			Path:      "/home/user/project",
-			Status:    "stopped",
+			Status:    "idle",
 			UpdatedAt: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)

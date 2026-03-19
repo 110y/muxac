@@ -6,7 +6,7 @@ type Status string
 const (
 	Running Status = "running"
 	Waiting Status = "waiting"
-	Stopped Status = "stopped"
+	Idle    Status = "idle"
 	Unknown Status = "unknown"
 )
 
@@ -19,7 +19,7 @@ func FromEvent(event string) (Status, bool) {
 	case "PermissionRequest":
 		return Waiting, true
 	case "Stop", "SessionStart", "SessionEnd":
-		return Stopped, true
+		return Idle, true
 	default:
 		return "", false
 	}

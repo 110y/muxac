@@ -275,13 +275,13 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 		st := status.Status(sess.Status)
 		if st == status.Running || st == status.Waiting {
 			if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
-				Status:    string(status.Stopped),
+				Status:    string(status.Idle),
 				UpdatedAt: timestamp.Now(),
 				Name:      sess.Name,
 				Path:      sess.Path,
 				Status_2:  string(st),
 			}); err != nil {
-				return fmt.Errorf("update status to stopped: %w", err)
+				return fmt.Errorf("update status to idle: %w", err)
 			}
 		}
 		return nil
@@ -413,7 +413,7 @@ func syncGeminiSession(ctx context.Context, queries *sqlc.Queries, homeDir strin
 	}
 
 	return queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
-		Status:    string(status.Stopped),
+		Status:    string(status.Idle),
 		UpdatedAt: timestamp.Now(),
 		Name:      sess.Name,
 		Path:      sess.Path,
@@ -449,7 +449,7 @@ type codexOpPayload struct {
 func codexEventToStatus(line codexLogLine) (status.Status, bool) {
 	switch line.Kind {
 	case "session_end":
-		return status.Stopped, true
+		return status.Idle, true
 	case "codex_event":
 		var p codexEventPayload
 		if json.Unmarshal(line.Payload, &p) != nil {
@@ -459,7 +459,7 @@ func codexEventToStatus(line codexLogLine) (status.Status, bool) {
 		case "task_started", "turn_started":
 			return status.Running, true
 		case "task_complete", "turn_complete", "turn_aborted", "shutdown_complete":
-			return status.Stopped, true
+			return status.Idle, true
 		case "exec_approval_request", "apply_patch_approval_request", "request_permissions", "request_user_input":
 			return status.Waiting, true
 		}
@@ -472,10 +472,10 @@ func codexEventToStatus(line codexLogLine) (status.Status, bool) {
 		case "user_input", "user_turn":
 			return status.Running, true
 		case "interrupt":
-			return status.Stopped, true
+			return status.Idle, true
 		case "exec_approval", "patch_approval":
 			if op.Decision == "abort" {
-				return status.Stopped, true
+				return status.Idle, true
 			}
 			return status.Running, true
 		}

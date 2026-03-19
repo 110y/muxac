@@ -31,7 +31,7 @@ $ muxac list
 DIRECTORY               NAME     STATUS
 /path/to/workspace-1    default  running
 /path/to/workspace-2    foo      waiting
-/path/to/workspace-3    bar      stopped
+/path/to/workspace-3    bar      idle
 
 # Attach to an existing session for the current directory.
 $ muxac attach
@@ -41,7 +41,7 @@ $ muxac attach
 |--------|-------------|
 | `running` | The agent is actively processing |
 | `waiting` | The agent is waiting for a user response |
-| `stopped` | The agent has stopped or the session is idle |
+| `idle` | The agent is idle |
 
 ## Installation
 

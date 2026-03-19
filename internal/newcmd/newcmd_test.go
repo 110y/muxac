@@ -99,8 +99,8 @@ func TestRun_NewSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get session status: %v", err)
 	}
-	if got != "stopped" {
-		t.Errorf("status = %q, want %q", got, "stopped")
+	if got != "idle" {
+		t.Errorf("status = %q, want %q", got, "idle")
 	}
 }
 

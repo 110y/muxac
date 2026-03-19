@@ -19,6 +19,7 @@ type Runner interface {
 	ListSessionNames(ctx context.Context) ([]string, error)
 	KillSession(ctx context.Context, sessionName string) error
 	NewDetachedSession(ctx context.Context, sessionName string, command string) error
+	CapturePane(ctx context.Context, sessionName string) (string, error)
 }
 
 // ExecRunner implements Runner by executing the tmux binary.
@@ -67,6 +68,17 @@ func (r *ExecRunner) NewDetachedSession(ctx context.Context, sessionName string,
 	cmd := exec.CommandContext(ctx, "tmux", "-L", socket, "new-session", "-d", "-s", sessionName, command)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return cmd.Run()
+}
+
+func (r *ExecRunner) CapturePane(ctx context.Context, sessionName string) (string, error) {
+	args := []string{"-L", socket, "capture-pane", "-t", "=" + sessionName + ":", "-p"}
+	cmd := exec.CommandContext(ctx, "tmux", args...)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+	return stdout.String(), nil
 }
 
 func (r *ExecRunner) ListSessionNames(ctx context.Context) ([]string, error) {

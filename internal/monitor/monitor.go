@@ -43,11 +43,17 @@ func parseTimestamp(s string) (time.Time, error) {
 	return time.Parse(time.RFC3339Nano, s)
 }
 
+type monitorState struct {
+	capturePaneClearCount map[string]int
+}
+
 // Run starts a monitoring loop that syncs session statuses between tmux and the database.
 // It runs an initial sync immediately, then repeats every second.
 // Returns nil on context cancellation.
 func Run(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, homeDir, cacheDir string, logger *slog.Logger) error {
-	if err := sync(ctx, tmuxRunner, queries, homeDir, cacheDir); err != nil {
+	state := &monitorState{capturePaneClearCount: make(map[string]int)}
+
+	if err := sync(ctx, tmuxRunner, queries, homeDir, cacheDir, state); err != nil {
 		logger.ErrorContext(ctx, "sync failed", "error", err)
 	}
 
@@ -59,7 +65,7 @@ func Run(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, hom
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := sync(ctx, tmuxRunner, queries, homeDir, cacheDir); err != nil {
+			if err := sync(ctx, tmuxRunner, queries, homeDir, cacheDir, state); err != nil {
 				logger.ErrorContext(ctx, "sync failed", "error", err)
 			}
 		}
@@ -93,7 +99,7 @@ func isInterruptionLine(line jsonlLine) bool {
 	return c.Type == "text" && strings.HasPrefix(c.Text, "[Request interrupted by user")
 }
 
-func sync(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, homeDir, cacheDir string) error {
+func sync(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, homeDir, cacheDir string, state *monitorState) error {
 	var errs []error
 
 	threshold := time.Now().Add(-7 * 24 * time.Hour).UTC().Format(timestamp.Format)
@@ -124,7 +130,7 @@ func sync(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, ho
 	}
 
 	for _, sess := range dbSessions {
-		if err := syncSession(ctx, queries, homeDir, cacheDir, sess, alive); err != nil {
+		if err := syncSession(ctx, tmuxRunner, queries, homeDir, cacheDir, sess, alive, state); err != nil {
 			errs = append(errs, fmt.Errorf("sync session %s/%s: %w", sess.Name, sess.Path, err))
 		}
 	}
@@ -132,7 +138,7 @@ func sync(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, ho
 	return errors.Join(errs...)
 }
 
-func syncSession(ctx context.Context, queries *sqlc.Queries, homeDir, cacheDir string, sess sqlc.ListSessionsRow, alive map[string]bool) error {
+func syncSession(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, homeDir, cacheDir string, sess sqlc.ListSessionsRow, alive map[string]bool, state *monitorState) error {
 	tmuxName := pathkey.TmuxSessionName(sess.Name, sess.Path)
 	codexLogPath := agent.CodexSessionLogPath(cacheDir, tmuxName)
 
@@ -144,6 +150,7 @@ func syncSession(ctx context.Context, queries *sqlc.Queries, homeDir, cacheDir s
 			return fmt.Errorf("delete dead session: %w", err)
 		}
 		os.Remove(codexLogPath)
+		delete(state.capturePaneClearCount, sess.Name+":"+sess.Path)
 		return nil
 	}
 
@@ -168,7 +175,7 @@ func syncSession(ctx context.Context, queries *sqlc.Queries, homeDir, cacheDir s
 	case agent.Codex:
 		return syncCodexSession(ctx, queries, cacheDir, sess, tmuxName)
 	case agent.Claude:
-		return syncClaudeCodeSession(ctx, queries, homeDir, sess)
+		return syncClaudeCodeSession(ctx, queries, homeDir, sess, tmuxRunner, tmuxName, state)
 	case agent.Gemini:
 		return syncGeminiSession(ctx, queries, homeDir, sess)
 	case agent.Unknown:
@@ -239,68 +246,145 @@ func readLastLines(filePath string, n int) ([]string, error) {
 	return result, nil
 }
 
-func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir string, sess sqlc.ListSessionsRow) error {
+func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir string, sess sqlc.ListSessionsRow, tmuxRunner tmux.Runner, tmuxName string, state *monitorState) error {
 	if sess.AgentSessionID == "" {
 		return nil
 	}
 
 	jsonlPath := agent.JsonlPath(agent.Claude, homeDir, sess.Path, sess.AgentSessionID)
-	if jsonlPath == "" {
-		return nil
-	}
 
-	lines, err := readLastLines(jsonlPath, 10)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
+	if jsonlPath != "" {
+		lines, err := readLastLines(jsonlPath, 10)
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("read jsonl tail %q: %w", jsonlPath, err)
 		}
-		return fmt.Errorf("read jsonl tail %q: %w", jsonlPath, err)
-	}
 
-	var lastLine jsonlLine
-	var maxTimestamp string
-	for _, raw := range lines {
-		var line jsonlLine
-		if err := json.Unmarshal([]byte(raw), &line); err != nil {
-			continue
-		}
-		lastLine = line
-		if line.Timestamp != "" && (maxTimestamp == "" || isAfter(line.Timestamp, maxTimestamp)) {
-			maxTimestamp = line.Timestamp
-		}
-	}
+		if len(lines) > 0 {
+			var lastLine jsonlLine
+			var maxTimestamp string
+			for _, raw := range lines {
+				var line jsonlLine
+				if err := json.Unmarshal([]byte(raw), &line); err != nil {
+					continue
+				}
+				lastLine = line
+				if line.Timestamp != "" && (maxTimestamp == "" || isAfter(line.Timestamp, maxTimestamp)) {
+					maxTimestamp = line.Timestamp
+				}
+			}
 
-	// Interruption check takes priority over waiting→running.
-	if isInterruptionLine(lastLine) && isAfter(lastLine.Timestamp, sess.UpdatedAt) {
-		st := status.Status(sess.Status)
-		if st == status.Running || st == status.Waiting {
-			if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
-				Status:    string(status.Idle),
-				UpdatedAt: timestamp.Now(),
-				Name:      sess.Name,
-				Path:      sess.Path,
-				Status_2:  string(st),
-			}); err != nil {
-				return fmt.Errorf("update status to idle: %w", err)
+			// Interruption check takes priority over waiting→running.
+			if isInterruptionLine(lastLine) && isAfter(lastLine.Timestamp, sess.UpdatedAt) {
+				st := status.Status(sess.Status)
+				if st == status.Running || st == status.Waiting {
+					if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
+						Status:    string(status.Idle),
+						UpdatedAt: timestamp.Now(),
+						Name:      sess.Name,
+						Path:      sess.Path,
+						Status_2:  string(st),
+					}); err != nil {
+						return fmt.Errorf("update status to idle: %w", err)
+					}
+				}
+				return nil
+			}
+
+			st := status.Status(sess.Status)
+			if st == status.Waiting && isAfter(maxTimestamp, sess.UpdatedAt) {
+				if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
+					Status:    string(status.Running),
+					UpdatedAt: timestamp.Now(),
+					Name:      sess.Name,
+					Path:      sess.Path,
+					Status_2:  string(st),
+				}); err != nil {
+					return fmt.Errorf("update status to running: %w", err)
+				}
+				delete(state.capturePaneClearCount, sess.Name+":"+sess.Path)
+				return nil
 			}
 		}
+	}
+
+	// Capture-pane based detection: when status is waiting and JSONL shows no new entries,
+	// check the terminal content for approval prompt visibility.
+	st := status.Status(sess.Status)
+	if st != status.Waiting {
+		delete(state.capturePaneClearCount, sess.Name+":"+sess.Path)
 		return nil
 	}
 
-	st := status.Status(sess.Status)
-	if st == status.Waiting && isAfter(maxTimestamp, sess.UpdatedAt) {
-		if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
-			Status:    string(status.Running),
-			UpdatedAt: timestamp.Now(),
-			Name:      sess.Name,
-			Path:      sess.Path,
-			Status_2:  string(st),
-		}); err != nil {
-			return fmt.Errorf("update status to running: %w", err)
-		}
+	sessionKey := sess.Name + ":" + sess.Path
+	output, err := tmuxRunner.CapturePane(ctx, tmuxName)
+	if err != nil {
+		return nil // non-fatal
 	}
 
+	if terminalShowsWaitingPrompt(output) {
+		state.capturePaneClearCount[sessionKey] = 0
+		return nil
+	}
+
+	state.capturePaneClearCount[sessionKey]++
+	if state.capturePaneClearCount[sessionKey] < 2 {
+		return nil // debounce: need 2 consecutive clears
+	}
+
+	delete(state.capturePaneClearCount, sessionKey)
+	if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
+		Status:    string(status.Running),
+		UpdatedAt: timestamp.Now(),
+		Name:      sess.Name,
+		Path:      sess.Path,
+		Status_2:  string(st),
+	}); err != nil {
+		return fmt.Errorf("update status to running via capture-pane: %w", err)
+	}
 	return nil
+}
+
+// terminalShowsWaitingPrompt checks if the captured terminal output contains
+// patterns indicating a permission/approval prompt is visible.
+func terminalShowsWaitingPrompt(output string) bool {
+	// Normalize non-breaking spaces (U+00A0) to regular spaces.
+	output = strings.ReplaceAll(output, "\u00a0", " ")
+
+	// Take the last 15 non-empty lines.
+	allLines := strings.Split(output, "\n")
+	var nonEmpty []string
+	for _, l := range allLines {
+		trimmed := strings.TrimSpace(l)
+		if trimmed != "" {
+			nonEmpty = append(nonEmpty, trimmed)
+		}
+	}
+	if len(nonEmpty) > 15 {
+		nonEmpty = nonEmpty[len(nonEmpty)-15:]
+	}
+
+	lower := strings.ToLower(strings.Join(nonEmpty, "\n"))
+
+	patterns := []string{
+		"yes, allow once",
+		"yes, allow always",
+		"allow once",
+		"allow always",
+		"no, and tell claude what to do differently",
+		"do you want",
+		"would you like",
+		"run this command?",
+		"execute this?",
+		"do you trust the files",
+		"use arrow keys to navigate",
+		"esc to cancel",
+	}
+	for _, p := range patterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // readTail reads the last n bytes from a file. If the file is smaller than n,

@@ -25,7 +25,7 @@ func Run(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, nam
 	if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
 		Name:      name,
 		Path:      workDir,
-		Status:    "stopped",
+		Status:    "idle",
 		UpdatedAt: timestamp.Now(),
 	}); err != nil {
 		return err

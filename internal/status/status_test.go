@@ -18,9 +18,9 @@ func TestFromEvent(t *testing.T) {
 		{name: "UserPromptSubmit", event: "UserPromptSubmit", want: status.Running, wantOK: true},
 		{name: "PreToolUse", event: "PreToolUse", want: status.Running, wantOK: true},
 		{name: "PermissionRequest", event: "PermissionRequest", want: status.Waiting, wantOK: true},
-		{name: "Stop", event: "Stop", want: status.Stopped, wantOK: true},
-		{name: "SessionStart", event: "SessionStart", want: status.Stopped, wantOK: true},
-		{name: "SessionEnd", event: "SessionEnd", want: status.Stopped, wantOK: true},
+		{name: "Stop", event: "Stop", want: status.Idle, wantOK: true},
+		{name: "SessionStart", event: "SessionStart", want: status.Idle, wantOK: true},
+		{name: "SessionEnd", event: "SessionEnd", want: status.Idle, wantOK: true},
 		{name: "unknown event", event: "SomeOtherEvent", want: "", wantOK: false},
 		{name: "empty event", event: "", want: "", wantOK: false},
 	}
@@ -55,7 +55,7 @@ func TestIsValidTransition(t *testing.T) {
 		{name: "waiting + SessionEnd", current: status.Waiting, event: "SessionEnd", want: true},
 		{name: "waiting + SessionStart", current: status.Waiting, event: "SessionStart", want: true},
 		{name: "running + Stop", current: status.Running, event: "Stop", want: true},
-		{name: "stopped + Stop", current: status.Stopped, event: "Stop", want: true},
+		{name: "idle + Stop", current: status.Idle, event: "Stop", want: true},
 	}
 
 	for _, tt := range tests {

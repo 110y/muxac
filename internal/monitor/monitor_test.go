@@ -206,7 +206,7 @@ func TestSync(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "stopped", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "idle", UpdatedAt: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -230,7 +230,7 @@ func TestSync(t *testing.T) {
 		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
 			`{"uuid":"uuid-1","timestamp":"2025-01-01T00:00:01Z"}`+"\n")
 
-		// Second sync: new UUID but status is stopped, should not transition
+		// Second sync: new UUID but status is idle, should not transition
 		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
 			t.Fatal(err)
 		}
@@ -240,8 +240,8 @@ func TestSync(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != "stopped" {
-			t.Errorf("got %q, want stopped", got)
+		if got != "idle" {
+			t.Errorf("got %q, want idle", got)
 		}
 	})
 
@@ -525,7 +525,7 @@ func TestSync(t *testing.T) {
 		}
 	})
 
-	t.Run("running becomes stopped on interruption", func(t *testing.T) {
+	t.Run("running becomes idle on interruption", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
@@ -562,12 +562,12 @@ func TestSync(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != "stopped" {
-			t.Errorf("got %q, want stopped", got)
+		if got != "idle" {
+			t.Errorf("got %q, want idle", got)
 		}
 	})
 
-	t.Run("waiting becomes stopped on interruption", func(t *testing.T) {
+	t.Run("waiting becomes idle on interruption", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
@@ -603,8 +603,8 @@ func TestSync(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != "stopped" {
-			t.Errorf("got %q, want stopped", got)
+		if got != "idle" {
+			t.Errorf("got %q, want idle", got)
 		}
 	})
 
@@ -679,7 +679,7 @@ func TestSync(t *testing.T) {
 		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
 			`{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]},"timestamp":"`+interruptTS+`"}`+"\n")
 
-		// First sync: transitions to stopped
+		// First sync: transitions to idle
 		if err := sync(ctx, ft, queries, homeDir, t.TempDir()); err != nil {
 			t.Fatal(err)
 		}
@@ -689,8 +689,8 @@ func TestSync(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != "stopped" {
-			t.Fatalf("after first sync: got %q, want stopped", got)
+		if got != "idle" {
+			t.Fatalf("after first sync: got %q, want idle", got)
 		}
 
 		// Simulate hook setting status to running (advances updated_at beyond the interruption timestamp)
@@ -802,8 +802,8 @@ func TestSync(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != "stopped" {
-			t.Errorf("got %q, want stopped (interruption should take priority over waiting->running)", got)
+		if got != "idle" {
+			t.Errorf("got %q, want idle (interruption should take priority over waiting->running)", got)
 		}
 	})
 
@@ -861,15 +861,15 @@ func TestSync(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Simulate: monitor reads session as "waiting", then hook changes to "stopped"
+		// Simulate: monitor reads session as "waiting", then hook changes to "idle"
 		// before monitor's CAS write
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "stopped", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "idle", UpdatedAt: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
 
-		// CAS should be a no-op because status is now "stopped", not "waiting"
+		// CAS should be a no-op because status is now "idle", not "waiting"
 		if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
 			Status:    "running",
 			UpdatedAt: timestamp.Now(),
@@ -886,8 +886,8 @@ func TestSync(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != "stopped" {
-			t.Errorf("got %q, want stopped (CAS should be no-op)", got)
+		if got != "idle" {
+			t.Errorf("got %q, want idle (CAS should be no-op)", got)
 		}
 	})
 }
@@ -1041,8 +1041,8 @@ func TestSyncGemini_CancellationDetected(t *testing.T) {
 	if len(sessions) != 1 {
 		t.Fatalf("expected 1 session, got %d", len(sessions))
 	}
-	if sessions[0].Status != "stopped" {
-		t.Errorf("status = %q, want %q", sessions[0].Status, "stopped")
+	if sessions[0].Status != "idle" {
+		t.Errorf("status = %q, want %q", sessions[0].Status, "idle")
 	}
 }
 
@@ -1149,7 +1149,7 @@ func TestSyncCodex(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "stopped", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "idle", UpdatedAt: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1177,7 +1177,7 @@ func TestSyncCodex(t *testing.T) {
 		}
 	})
 
-	t.Run("task_complete transitions to stopped", func(t *testing.T) {
+	t.Run("task_complete transitions to idle", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		cacheDir := t.TempDir()
@@ -1209,8 +1209,8 @@ func TestSyncCodex(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != "stopped" {
-			t.Errorf("got %q, want stopped", got)
+		if got != "idle" {
+			t.Errorf("got %q, want idle", got)
 		}
 	})
 
@@ -1436,7 +1436,7 @@ func TestSyncCodex(t *testing.T) {
 		}
 	})
 
-	t.Run("turn_aborted transitions to stopped", func(t *testing.T) {
+	t.Run("turn_aborted transitions to idle", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		cacheDir := t.TempDir()
@@ -1468,12 +1468,12 @@ func TestSyncCodex(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != "stopped" {
-			t.Errorf("got %q, want stopped", got)
+		if got != "idle" {
+			t.Errorf("got %q, want idle", got)
 		}
 	})
 
-	t.Run("shutdown_complete transitions to stopped", func(t *testing.T) {
+	t.Run("shutdown_complete transitions to idle", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		cacheDir := t.TempDir()
@@ -1505,12 +1505,12 @@ func TestSyncCodex(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != "stopped" {
-			t.Errorf("got %q, want stopped", got)
+		if got != "idle" {
+			t.Errorf("got %q, want idle", got)
 		}
 	})
 
-	t.Run("interrupt during waiting results in stopped via turn_aborted", func(t *testing.T) {
+	t.Run("interrupt during waiting results in idle via turn_aborted", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		cacheDir := t.TempDir()
@@ -1545,8 +1545,8 @@ func TestSyncCodex(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != "stopped" {
-			t.Errorf("got %q, want stopped (interrupt during waiting should result in stopped)", got)
+		if got != "idle" {
+			t.Errorf("got %q, want idle (interrupt during waiting should result in idle)", got)
 		}
 	})
 
@@ -1588,7 +1588,7 @@ func TestSyncCodex(t *testing.T) {
 		}
 	})
 
-	t.Run("op exec_approval abort transitions to stopped", func(t *testing.T) {
+	t.Run("op exec_approval abort transitions to idle", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		cacheDir := t.TempDir()
@@ -1621,12 +1621,12 @@ func TestSyncCodex(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != "stopped" {
-			t.Errorf("got %q, want stopped (abort should transition to stopped)", got)
+		if got != "idle" {
+			t.Errorf("got %q, want idle (abort should transition to idle)", got)
 		}
 	})
 
-	t.Run("op interrupt transitions to stopped", func(t *testing.T) {
+	t.Run("op interrupt transitions to idle", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		cacheDir := t.TempDir()
@@ -1658,12 +1658,12 @@ func TestSyncCodex(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != "stopped" {
-			t.Errorf("got %q, want stopped", got)
+		if got != "idle" {
+			t.Errorf("got %q, want idle", got)
 		}
 	})
 
-	t.Run("session_end transitions to stopped", func(t *testing.T) {
+	t.Run("session_end transitions to idle", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		cacheDir := t.TempDir()
@@ -1695,8 +1695,8 @@ func TestSyncCodex(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != "stopped" {
-			t.Errorf("got %q, want stopped", got)
+		if got != "idle" {
+			t.Errorf("got %q, want idle", got)
 		}
 	})
 
@@ -1709,7 +1709,7 @@ func TestSyncCodex(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "stopped", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "idle", UpdatedAt: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1732,8 +1732,8 @@ func TestSyncCodex(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != "stopped" {
-			t.Errorf("got %q, want stopped (old event should be ignored)", got)
+		if got != "idle" {
+			t.Errorf("got %q, want idle (old event should be ignored)", got)
 		}
 	})
 
@@ -1746,7 +1746,7 @@ func TestSyncCodex(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "stopped", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "idle", UpdatedAt: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1850,7 +1850,7 @@ func TestSyncCodex(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "stopped", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "idle", UpdatedAt: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1903,7 +1903,7 @@ func TestSyncCodex(t *testing.T) {
 
 		// CAS should be a no-op because status is now "waiting", not "running"
 		if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
-			Status:    "stopped",
+			Status:    "idle",
 			UpdatedAt: timestamp.Now(),
 			Name:      "default",
 			Path:      "/home/user/project",
@@ -2132,8 +2132,8 @@ func TestFindLastCodexStatus(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if st != "stopped" {
-			t.Errorf("status = %q, want stopped", st)
+		if st != "idle" {
+			t.Errorf("status = %q, want idle", st)
 		}
 		if ts != "2099-01-01T00:00:02.000Z" {
 			t.Errorf("ts = %q, want 2099-01-01T00:00:02.000Z", ts)

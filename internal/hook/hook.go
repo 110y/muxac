@@ -64,11 +64,16 @@ func Run(ctx context.Context, r io.Reader, queries *sqlc.Queries, sessionName, p
 	}
 
 	if target != current {
+		var waitingSince string
+		if target == status.Waiting {
+			waitingSince = timestamp.Now()
+		}
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name:      sessionName,
-			Path:      projectDir,
-			Status:    string(target),
-			UpdatedAt: timestamp.Now(),
+			Name:         sessionName,
+			Path:         projectDir,
+			Status:       string(target),
+			UpdatedAt:    timestamp.Now(),
+			WaitingSince: waitingSince,
 		}); err != nil {
 			return err
 		}
@@ -90,12 +95,6 @@ func Run(ctx context.Context, r io.Reader, queries *sqlc.Queries, sessionName, p
 				UpdatedAt:      timestamp.Now(),
 				Name:           sessionName,
 				Path:           projectDir,
-			}); err != nil {
-				return err
-			}
-			if err := queries.DeleteJsonlEntries(ctx, sqlc.DeleteJsonlEntriesParams{
-				SessionName: sessionName,
-				SessionPath: projectDir,
 			}); err != nil {
 				return err
 			}

@@ -438,14 +438,9 @@ func TestRunSessionStart_SavesSessionID(t *testing.T) {
 	ctx := t.Context()
 	queries := database.SetupTestDB(t)
 
-	// Pre-create session and add some JSONL entries
+	// Pre-create session
 	if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
 		Name: "default", Path: "/project", Status: "running", UpdatedAt: timestamp.Now(),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := queries.UpsertJsonlEntry(ctx, sqlc.UpsertJsonlEntryParams{
-		SessionName: "default", SessionPath: "/project", Uuid: "old-uuid", Timestamp: "2025-01-01T00:00:00Z",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -467,13 +462,69 @@ func TestRunSessionStart_SavesSessionID(t *testing.T) {
 	if sessions[0].AgentSessionID != "abc-123" {
 		t.Errorf("agent_session_id = %q, want %q", sessions[0].AgentSessionID, "abc-123")
 	}
+}
 
-	// Verify old JSONL entries were cleared
-	_, err = queries.GetLatestJsonlEntry(ctx, sqlc.GetLatestJsonlEntryParams{
-		SessionName: "default", SessionPath: "/project",
-	})
-	if err == nil {
-		t.Error("expected no JSONL entries after SessionStart, but found some")
+func TestRunPermissionRequest_SetsWaitingSince(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	queries := database.SetupTestDB(t)
+
+	// Pre-create session as running
+	if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+		Name: "default", Path: "/project", Status: "running", UpdatedAt: timestamp.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	before := timestamp.Now()
+	r := strings.NewReader(`{"hook_event_name": "PermissionRequest"}`)
+	if err := hook.Run(ctx, r, queries, "default", "/project", agent.Claude); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sessions, err := queries.ListSessions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].WaitingSince == "" {
+		t.Fatal("waiting_since should be set on PermissionRequest")
+	}
+	if sessions[0].WaitingSince < before {
+		t.Errorf("waiting_since = %q, expected >= %q", sessions[0].WaitingSince, before)
+	}
+}
+
+func TestRunUserPromptSubmit_ClearsWaitingSince(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	queries := database.SetupTestDB(t)
+
+	// Pre-create session as waiting with waiting_since set
+	if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+		Name: "default", Path: "/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	r := strings.NewReader(`{"hook_event_name": "UserPromptSubmit"}`)
+	if err := hook.Run(ctx, r, queries, "default", "/project", agent.Claude); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sessions, err := queries.ListSessions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].WaitingSince != "" {
+		t.Errorf("waiting_since = %q, want empty after UserPromptSubmit", sessions[0].WaitingSince)
 	}
 }
 

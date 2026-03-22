@@ -1,18 +1,19 @@
 -- name: UpsertSessionStatus :exec
-INSERT INTO sessions (name, path, status, updated_at)
-VALUES (?, ?, ?, ?)
+INSERT INTO sessions (name, path, status, updated_at, waiting_since)
+VALUES (?, ?, ?, ?, ?)
 ON CONFLICT (name, path) DO UPDATE SET
     status = excluded.status,
-    updated_at = excluded.updated_at;
+    updated_at = excluded.updated_at,
+    waiting_since = excluded.waiting_since;
 
 -- name: GetSessionStatus :one
 SELECT status FROM sessions WHERE name = ? AND path = ?;
 
 -- name: ListSessions :many
-SELECT name, path, status, agent_session_id, agent_tool, updated_at FROM sessions;
+SELECT name, path, status, agent_session_id, agent_tool, updated_at, waiting_since FROM sessions;
 
 -- name: UpdateSessionStatusIfUnchanged :exec
-UPDATE sessions SET status = ?, updated_at = ?
+UPDATE sessions SET status = ?, updated_at = ?, waiting_since = ''
 WHERE name = ? AND path = ? AND status = ?;
 
 -- name: UpdateAgentSessionID :exec
@@ -22,20 +23,6 @@ WHERE name = ? AND path = ?;
 -- name: UpdateAgentTool :exec
 UPDATE sessions SET agent_tool = ?, updated_at = ?
 WHERE name = ? AND path = ?;
-
--- name: UpsertJsonlEntry :exec
-INSERT INTO jsonl_entries (session_name, session_path, uuid, timestamp)
-VALUES (?, ?, ?, ?)
-ON CONFLICT (session_name, session_path, uuid) DO NOTHING;
-
--- name: GetLatestJsonlEntry :one
-SELECT uuid, timestamp FROM jsonl_entries
-WHERE session_name = ? AND session_path = ?
-ORDER BY timestamp DESC
-LIMIT 1;
-
--- name: DeleteJsonlEntries :exec
-DELETE FROM jsonl_entries WHERE session_name = ? AND session_path = ?;
 
 -- name: DeleteSession :exec
 DELETE FROM sessions WHERE name = ? AND path = ?;

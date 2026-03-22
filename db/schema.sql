@@ -6,16 +6,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     agent_tool         TEXT NOT NULL DEFAULT '' CHECK (agent_tool IN ('', 'claude', 'codex', 'gemini')),
     created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    waiting_since      TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (path, name)
-);
-
-CREATE TABLE IF NOT EXISTS jsonl_entries (
-    session_name TEXT NOT NULL,
-    session_path TEXT NOT NULL,
-    uuid         TEXT NOT NULL,
-    timestamp    TEXT NOT NULL,
-    PRIMARY KEY (session_name, session_path, uuid),
-    FOREIGN KEY (session_name, session_path) REFERENCES sessions(name, path) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS monitor_heartbeat (

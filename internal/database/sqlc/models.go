@@ -11,13 +11,6 @@ type DebugLog struct {
 	CreatedAt string
 }
 
-type JsonlEntry struct {
-	SessionName string
-	SessionPath string
-	Uuid        string
-	Timestamp   string
-}
-
 type MonitorHeartbeat struct {
 	ID        int64
 	Version   string
@@ -32,4 +25,5 @@ type Session struct {
 	AgentTool      string
 	CreatedAt      string
 	UpdatedAt      string
+	WaitingSince   string
 }

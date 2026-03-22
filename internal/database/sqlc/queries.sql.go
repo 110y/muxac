@@ -9,20 +9,6 @@ import (
 	"context"
 )
 
-const deleteJsonlEntries = `-- name: DeleteJsonlEntries :exec
-DELETE FROM jsonl_entries WHERE session_name = ? AND session_path = ?
-`
-
-type DeleteJsonlEntriesParams struct {
-	SessionName string
-	SessionPath string
-}
-
-func (q *Queries) DeleteJsonlEntries(ctx context.Context, arg DeleteJsonlEntriesParams) error {
-	_, err := q.db.ExecContext(ctx, deleteJsonlEntries, arg.SessionName, arg.SessionPath)
-	return err
-}
-
 const deleteOldDebugLog = `-- name: DeleteOldDebugLog :exec
 DELETE FROM debug_log WHERE created_at < ?
 `
@@ -44,30 +30,6 @@ type DeleteSessionParams struct {
 func (q *Queries) DeleteSession(ctx context.Context, arg DeleteSessionParams) error {
 	_, err := q.db.ExecContext(ctx, deleteSession, arg.Name, arg.Path)
 	return err
-}
-
-const getLatestJsonlEntry = `-- name: GetLatestJsonlEntry :one
-SELECT uuid, timestamp FROM jsonl_entries
-WHERE session_name = ? AND session_path = ?
-ORDER BY timestamp DESC
-LIMIT 1
-`
-
-type GetLatestJsonlEntryParams struct {
-	SessionName string
-	SessionPath string
-}
-
-type GetLatestJsonlEntryRow struct {
-	Uuid      string
-	Timestamp string
-}
-
-func (q *Queries) GetLatestJsonlEntry(ctx context.Context, arg GetLatestJsonlEntryParams) (GetLatestJsonlEntryRow, error) {
-	row := q.db.QueryRowContext(ctx, getLatestJsonlEntry, arg.SessionName, arg.SessionPath)
-	var i GetLatestJsonlEntryRow
-	err := row.Scan(&i.Uuid, &i.Timestamp)
-	return i, err
 }
 
 const getMonitorHeartbeat = `-- name: GetMonitorHeartbeat :one
@@ -118,7 +80,7 @@ func (q *Queries) InsertDebugLog(ctx context.Context, arg InsertDebugLogParams) 
 }
 
 const listSessions = `-- name: ListSessions :many
-SELECT name, path, status, agent_session_id, agent_tool, updated_at FROM sessions
+SELECT name, path, status, agent_session_id, agent_tool, updated_at, waiting_since FROM sessions
 `
 
 type ListSessionsRow struct {
@@ -128,6 +90,7 @@ type ListSessionsRow struct {
 	AgentSessionID string
 	AgentTool      string
 	UpdatedAt      string
+	WaitingSince   string
 }
 
 func (q *Queries) ListSessions(ctx context.Context) ([]ListSessionsRow, error) {
@@ -146,6 +109,7 @@ func (q *Queries) ListSessions(ctx context.Context) ([]ListSessionsRow, error) {
 			&i.AgentSessionID,
 			&i.AgentTool,
 			&i.UpdatedAt,
+			&i.WaitingSince,
 		); err != nil {
 			return nil, err
 		}
@@ -205,7 +169,7 @@ func (q *Queries) UpdateAgentTool(ctx context.Context, arg UpdateAgentToolParams
 }
 
 const updateSessionStatusIfUnchanged = `-- name: UpdateSessionStatusIfUnchanged :exec
-UPDATE sessions SET status = ?, updated_at = ?
+UPDATE sessions SET status = ?, updated_at = ?, waiting_since = ''
 WHERE name = ? AND path = ? AND status = ?
 `
 
@@ -224,29 +188,6 @@ func (q *Queries) UpdateSessionStatusIfUnchanged(ctx context.Context, arg Update
 		arg.Name,
 		arg.Path,
 		arg.Status_2,
-	)
-	return err
-}
-
-const upsertJsonlEntry = `-- name: UpsertJsonlEntry :exec
-INSERT INTO jsonl_entries (session_name, session_path, uuid, timestamp)
-VALUES (?, ?, ?, ?)
-ON CONFLICT (session_name, session_path, uuid) DO NOTHING
-`
-
-type UpsertJsonlEntryParams struct {
-	SessionName string
-	SessionPath string
-	Uuid        string
-	Timestamp   string
-}
-
-func (q *Queries) UpsertJsonlEntry(ctx context.Context, arg UpsertJsonlEntryParams) error {
-	_, err := q.db.ExecContext(ctx, upsertJsonlEntry,
-		arg.SessionName,
-		arg.SessionPath,
-		arg.Uuid,
-		arg.Timestamp,
 	)
 	return err
 }
@@ -270,18 +211,20 @@ func (q *Queries) UpsertMonitorHeartbeat(ctx context.Context, arg UpsertMonitorH
 }
 
 const upsertSessionStatus = `-- name: UpsertSessionStatus :exec
-INSERT INTO sessions (name, path, status, updated_at)
-VALUES (?, ?, ?, ?)
+INSERT INTO sessions (name, path, status, updated_at, waiting_since)
+VALUES (?, ?, ?, ?, ?)
 ON CONFLICT (name, path) DO UPDATE SET
     status = excluded.status,
-    updated_at = excluded.updated_at
+    updated_at = excluded.updated_at,
+    waiting_since = excluded.waiting_since
 `
 
 type UpsertSessionStatusParams struct {
-	Name      string
-	Path      string
-	Status    string
-	UpdatedAt string
+	Name         string
+	Path         string
+	Status       string
+	UpdatedAt    string
+	WaitingSince string
 }
 
 func (q *Queries) UpsertSessionStatus(ctx context.Context, arg UpsertSessionStatusParams) error {
@@ -290,6 +233,7 @@ func (q *Queries) UpsertSessionStatus(ctx context.Context, arg UpsertSessionStat
 		arg.Path,
 		arg.Status,
 		arg.UpdatedAt,
+		arg.WaitingSince,
 	)
 	return err
 }

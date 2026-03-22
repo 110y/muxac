@@ -291,7 +291,7 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 			}
 
 			st := status.Status(sess.Status)
-			if st == status.Waiting && isAfter(maxTimestamp, sess.UpdatedAt) {
+			if st == status.Waiting && sess.WaitingSince != "" && isAfter(maxTimestamp, sess.WaitingSince) {
 				if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
 					Status:    string(status.Running),
 					UpdatedAt: timestamp.Now(),

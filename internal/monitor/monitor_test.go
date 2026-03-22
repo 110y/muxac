@@ -130,7 +130,7 @@ func TestSync(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -172,7 +172,7 @@ func TestSync(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -266,7 +266,7 @@ func TestSync(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -305,7 +305,7 @@ func TestSync(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -334,7 +334,7 @@ func TestSync(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/dev/bigproj", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/dev/bigproj", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -386,7 +386,7 @@ func TestSync(t *testing.T) {
 
 		// Session is waiting (updated_at = now, guaranteed > 2000-...)
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -453,7 +453,7 @@ func TestSync(t *testing.T) {
 
 		// Simulate hook setting status to waiting
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -512,7 +512,7 @@ func TestSync(t *testing.T) {
 
 		// Step 2: PermissionRequest hook fires → status = waiting, updated_at = now
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -588,7 +588,7 @@ func TestSync(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -780,7 +780,7 @@ func TestSync(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -828,7 +828,7 @@ func TestSync(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -869,7 +869,7 @@ func TestSync(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -927,7 +927,7 @@ func TestSync(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -976,7 +976,7 @@ func TestSync(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1032,7 +1032,7 @@ func TestSync(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1076,7 +1076,7 @@ func TestSync(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1116,7 +1116,7 @@ func TestSync(t *testing.T) {
 		queries := database.SetupTestDB(t)
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1674,7 +1674,7 @@ func TestSyncCodex(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1711,7 +1711,7 @@ func TestSyncCodex(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1822,7 +1822,7 @@ func TestSyncCodex(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1862,7 +1862,7 @@ func TestSyncCodex(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1900,7 +1900,7 @@ func TestSyncCodex(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -2124,7 +2124,7 @@ func TestSyncCodex(t *testing.T) {
 		homeDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -2199,7 +2199,7 @@ func TestSyncCodex(t *testing.T) {
 		// Simulate: monitor reads session as "running", then hook changes to "waiting"
 		// before monitor's CAS write
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}

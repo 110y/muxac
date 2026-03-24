@@ -229,10 +229,10 @@ func TestRunWithCurrentState(t *testing.T) {
 			wantStatus:    "running",
 		},
 		{
-			name:          "waiting + PreToolUse becomes running",
+			name:          "waiting + PreToolUse stays waiting",
 			initialStatus: "waiting",
 			input:         `{"hook_event_name": "PreToolUse"}`,
-			wantStatus:    "running",
+			wantStatus:    "waiting",
 		},
 		{
 			name:          "waiting + Stop stays waiting",

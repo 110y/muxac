@@ -51,6 +51,7 @@ func TestIsValidTransition(t *testing.T) {
 		{name: "unknown + UserPromptSubmit", current: status.Unknown, event: "UserPromptSubmit", want: true},
 		{name: "unknown + Stop", current: status.Unknown, event: "Stop", want: true},
 		{name: "waiting + Stop blocked", current: status.Waiting, event: "Stop", want: false},
+		{name: "waiting + PreToolUse blocked", current: status.Waiting, event: "PreToolUse", want: false},
 		{name: "waiting + UserPromptSubmit", current: status.Waiting, event: "UserPromptSubmit", want: true},
 		{name: "waiting + SessionEnd", current: status.Waiting, event: "SessionEnd", want: true},
 		{name: "waiting + SessionStart", current: status.Waiting, event: "SessionStart", want: true},

@@ -28,7 +28,7 @@ func FromEvent(event string) (Status, bool) {
 // IsValidTransition checks whether transitioning from current based on the
 // given event is allowed.
 func IsValidTransition(current Status, event string) bool {
-	if current == Waiting && event == "Stop" {
+	if current == Waiting && (event == "Stop" || event == "PreToolUse") {
 		return false
 	}
 	return true

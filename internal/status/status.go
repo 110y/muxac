@@ -14,7 +14,7 @@ const (
 // Returns the status and true if the event is recognized, or empty and false otherwise.
 func FromEvent(event string) (Status, bool) {
 	switch event {
-	case "UserPromptSubmit", "PreToolUse":
+	case "UserPromptSubmit", "PreToolUse", "PostToolUse":
 		return Running, true
 	case "PermissionRequest":
 		return Waiting, true

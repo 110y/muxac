@@ -32,7 +32,7 @@ func Run(ctx context.Context, r io.Reader, queries *sqlc.Queries, sessionName, p
 	}
 
 	eventName := input.HookEventName
-	if eventName == "Notification" && input.NotificationType == "ToolPermission" {
+	if eventName == "Notification" && (input.NotificationType == "permission_prompt" || input.NotificationType == "ToolPermission") {
 		eventName = "PermissionRequest"
 	}
 

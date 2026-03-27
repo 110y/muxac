@@ -47,6 +47,16 @@ func TestRun(t *testing.T) {
 			wantStatus:  "waiting",
 		},
 		{
+			name:        "PostToolUse writes running",
+			input:       `{"hook_event_name": "PostToolUse"}`,
+			sessionName: "default",
+			projectDir:  "/home/user/project",
+			tool:        agent.Claude,
+			wantName:    "default",
+			wantPath:    "/home/user/project",
+			wantStatus:  "running",
+		},
+		{
 			name:        "Stop writes idle",
 			input:       `{"hook_event_name": "Stop"}`,
 			sessionName: "default",
@@ -235,6 +245,12 @@ func TestRunWithCurrentState(t *testing.T) {
 			wantStatus:    "waiting",
 		},
 		{
+			name:          "waiting + PostToolUse becomes running",
+			initialStatus: "waiting",
+			input:         `{"hook_event_name": "PostToolUse"}`,
+			wantStatus:    "running",
+		},
+		{
 			name:          "waiting + Stop stays waiting",
 			initialStatus: "waiting",
 			input:         `{"hook_event_name": "Stop"}`,
@@ -298,6 +314,12 @@ func TestRunWithCurrentState(t *testing.T) {
 			name:          "running + UserPromptSubmit stays running",
 			initialStatus: "running",
 			input:         `{"hook_event_name": "UserPromptSubmit"}`,
+			wantStatus:    "running",
+		},
+		{
+			name:          "running + PostToolUse stays running",
+			initialStatus: "running",
+			input:         `{"hook_event_name": "PostToolUse"}`,
 			wantStatus:    "running",
 		},
 	}

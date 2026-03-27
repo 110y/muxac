@@ -44,9 +44,8 @@ func parseTimestamp(s string) (time.Time, error) {
 }
 
 type monitorState struct {
-	capturePaneClearCount    map[string]int
-	waitingBaselineTimestamp map[string]string
-	capturePromptSeen        map[string]bool
+	capturePaneClearCount map[string]int
+	capturePromptSeen     map[string]bool
 }
 
 // Run starts a monitoring loop that syncs session statuses between tmux and the database.
@@ -54,9 +53,8 @@ type monitorState struct {
 // Returns nil on context cancellation.
 func Run(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, homeDir, cacheDir string, logger *slog.Logger) error {
 	state := &monitorState{
-		capturePaneClearCount:    make(map[string]int),
-		waitingBaselineTimestamp: make(map[string]string),
-		capturePromptSeen:        make(map[string]bool),
+		capturePaneClearCount: make(map[string]int),
+		capturePromptSeen:     make(map[string]bool),
 	}
 
 	if err := sync(ctx, tmuxRunner, queries, homeDir, cacheDir, state); err != nil {
@@ -157,7 +155,6 @@ func syncSession(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Quer
 		}
 		os.Remove(codexLogPath)
 		delete(state.capturePaneClearCount, sess.Name+":"+sess.Path)
-		delete(state.waitingBaselineTimestamp, sess.Name+":"+sess.Path)
 		delete(state.capturePromptSeen, sess.Name+":"+sess.Path)
 		return nil
 	}
@@ -301,9 +298,17 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 			st := status.Status(sess.Status)
 			sessionKey := sess.Name + ":" + sess.Path
 			if st == status.Waiting && sess.WaitingSince != "" {
-				if baseline, ok := state.waitingBaselineTimestamp[sessionKey]; ok {
-					if isAfter(maxTimestamp, baseline) {
-						delete(state.waitingBaselineTimestamp, sessionKey)
+				waitingSinceTime, err := parseTimestamp(sess.WaitingSince)
+				if err == nil {
+					threshold := waitingSinceTime.Add(2 * time.Second)
+					maxTimestampTime, err := parseTimestamp(maxTimestamp)
+					if err == nil && maxTimestampTime.After(threshold) {
+						// Guard: check capture-pane before transitioning.
+						// If the permission prompt is still visible, do not revert.
+						output, cpErr := tmuxRunner.CapturePane(ctx, tmuxName)
+						if cpErr == nil && terminalShowsWaitingPrompt(output) {
+							return nil
+						}
 						if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
 							Status:    string(status.Running),
 							UpdatedAt: timestamp.Now(),
@@ -316,8 +321,6 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 						delete(state.capturePaneClearCount, sessionKey)
 						return nil
 					}
-				} else {
-					state.waitingBaselineTimestamp[sessionKey] = maxTimestamp
 				}
 			}
 		}
@@ -329,7 +332,6 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 	sessionKey := sess.Name + ":" + sess.Path
 	if st != status.Waiting {
 		delete(state.capturePaneClearCount, sessionKey)
-		delete(state.waitingBaselineTimestamp, sessionKey)
 		delete(state.capturePromptSeen, sessionKey)
 		return nil
 	}

@@ -77,9 +77,8 @@ func (f *fakeTmux) CapturePane(_ context.Context, sessionName string) (string, e
 
 func newMonitorState() *monitorState {
 	return &monitorState{
-		capturePaneClearCount:    make(map[string]int),
-		waitingBaselineTimestamp: make(map[string]string),
-		capturePromptSeen:        make(map[string]bool),
+		capturePaneClearCount: make(map[string]int),
+		capturePromptSeen:     make(map[string]bool),
 	}
 }
 
@@ -126,7 +125,7 @@ func TestSync(t *testing.T) {
 		}
 	})
 
-	t.Run("waiting becomes running when new JSONL entry appears after baseline", func(t *testing.T) {
+	t.Run("waiting becomes running when JSONL timestamp exceeds waiting_since threshold", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
@@ -134,8 +133,9 @@ func TestSync(t *testing.T) {
 		homeDir := t.TempDir()
 		cacheDir := t.TempDir()
 
+		// WaitingSince is set to a known past time; JSONL entry is >2s after it.
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: "2090-01-01T00:00:00.000Z", WaitingSince: "2090-01-01T00:00:00.000Z",
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -150,36 +150,14 @@ func TestSync(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Write initial JSONL (represents entries present when permission was requested).
+		// JSONL entry timestamp is >2s after WaitingSince → should transition.
 		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
-			`{"uuid":"uuid-1","timestamp":"2098-01-01T00:00:01.000Z"}`+"\n")
+			`{"uuid":"uuid-1","timestamp":"2090-01-01T00:00:05.000Z"}`+"\n")
 
-		state := newMonitorState()
-
-		// First sync: records baseline timestamp from existing JSONL entries.
-		if err := sync(ctx, ft, queries, homeDir, cacheDir, state); err != nil {
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
-			Name: "default", Path: "/home/user/project",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got != "waiting" {
-			t.Fatalf("after first sync: got %q, want waiting (baseline recording)", got)
-		}
-
-		// Write newer JSONL entry (represents activity after user approved permission).
-		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
-			`{"uuid":"uuid-1","timestamp":"2098-01-01T00:00:01.000Z"}`+"\n"+
-				`{"uuid":"uuid-2","timestamp":"2099-01-01T00:00:01.000Z"}`+"\n")
-
-		// Second sync: detects new entry after baseline, transitions to running.
-		if err := sync(ctx, ft, queries, homeDir, cacheDir, state); err != nil {
-			t.Fatal(err)
-		}
-		got, err = queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
 			Name: "default", Path: "/home/user/project",
 		})
 		if err != nil {
@@ -199,7 +177,7 @@ func TestSync(t *testing.T) {
 		cacheDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: "2090-01-01T00:00:00.000Z", WaitingSince: "2090-01-01T00:00:00.000Z",
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -216,26 +194,16 @@ func TestSync(t *testing.T) {
 
 		state := newMonitorState()
 
-		// Write initial JSONL
+		// JSONL entry >2s after WaitingSince → transitions to running.
 		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
-			`{"uuid":"uuid-1","timestamp":"2098-01-01T00:00:01.000Z"}`+"\n")
+			`{"uuid":"uuid-1","timestamp":"2090-01-01T00:00:05.000Z"}`+"\n")
 
-		// First sync: records baseline
+		// First sync: transitions to running
 		if err := sync(ctx, ft, queries, homeDir, cacheDir, state); err != nil {
 			t.Fatal(err)
 		}
 
-		// Write newer JSONL entry
-		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
-			`{"uuid":"uuid-1","timestamp":"2098-01-01T00:00:01.000Z"}`+"\n"+
-				`{"uuid":"uuid-2","timestamp":"2099-01-01T00:00:01.000Z"}`+"\n")
-
-		// Second sync: transitions to running
-		if err := sync(ctx, ft, queries, homeDir, cacheDir, state); err != nil {
-			t.Fatal(err)
-		}
-
-		// Third sync: status is already running, the st == status.Waiting guard prevents re-triggering
+		// Second sync: status is already running, the st == status.Waiting guard prevents re-triggering
 		if err := sync(ctx, ft, queries, homeDir, cacheDir, state); err != nil {
 			t.Fatal(err)
 		}
@@ -246,7 +214,7 @@ func TestSync(t *testing.T) {
 			t.Fatal(err)
 		}
 		if got != "running" {
-			t.Errorf("after third sync: got %q, want running", got)
+			t.Errorf("after second sync: got %q, want running", got)
 		}
 	})
 
@@ -469,7 +437,93 @@ func TestSync(t *testing.T) {
 		}
 	})
 
-	t.Run("new UUIDs postdating waiting trigger transition", func(t *testing.T) {
+	t.Run("JSONL entries within 2s buffer of waiting_since stay waiting", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+		cacheDir := t.TempDir()
+
+		// WaitingSince = T, JSONL timestamp = T+1s (within 2s buffer).
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: "2090-01-01T00:00:00.000Z", WaitingSince: "2090-01-01T00:00:00.000Z",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// JSONL entry at T+1s — within the 2s buffer, should NOT trigger transition.
+		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
+			`{"uuid":"uuid-1","timestamp":"2090-01-01T00:00:01.000Z"}`+"\n")
+
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
+			t.Fatal(err)
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "waiting" {
+			t.Errorf("got %q, want waiting (entries within 2s buffer should not trigger transition)", got)
+		}
+	})
+
+	t.Run("JSONL entries beyond 2s buffer of waiting_since trigger transition", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+		cacheDir := t.TempDir()
+
+		// WaitingSince = T, JSONL timestamp = T+3s (beyond 2s buffer).
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: "2090-01-01T00:00:00.000Z", WaitingSince: "2090-01-01T00:00:00.000Z",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// JSONL entry at T+3s — beyond the 2s buffer, should trigger transition.
+		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
+			`{"uuid":"uuid-1","timestamp":"2090-01-01T00:00:03.000Z"}`+"\n")
+
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
+			t.Fatal(err)
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "running" {
+			t.Errorf("got %q, want running (entries beyond 2s buffer should trigger transition)", got)
+		}
+	})
+
+	t.Run("new JSONL entries postdating waiting_since threshold trigger transition", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
@@ -501,28 +555,18 @@ func TestSync(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Simulate hook setting status to waiting
+		// Simulate hook setting status to waiting with a known WaitingSince.
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: "2090-01-01T00:00:00.000Z", WaitingSince: "2090-01-01T00:00:00.000Z",
 		}); err != nil {
 			t.Fatal(err)
 		}
 
-		// Write initial JSONL entry (represents entries present when waiting started).
+		// Write JSONL entry >2s after WaitingSince (represents activity after user approved).
 		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
-			`{"uuid":"uuid-initial","timestamp":"2098-01-01T00:00:01.000Z"}`+"\n")
+			`{"uuid":"uuid-future","timestamp":"2090-01-01T00:00:05.000Z"}`+"\n")
 
-		// Second sync: records baseline from initial JSONL entry.
-		if err := sync(ctx, ft, queries, homeDir, cacheDir, state); err != nil {
-			t.Fatal(err)
-		}
-
-		// Write newer JSONL entry (represents activity after user approved).
-		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
-			`{"uuid":"uuid-initial","timestamp":"2098-01-01T00:00:01.000Z"}`+"\n"+
-				`{"uuid":"uuid-future","timestamp":"2099-01-01T00:00:01.000Z"}`+"\n")
-
-		// Third sync: detects newer entry after baseline, transitions to running.
+		// Sync detects JSONL timestamp exceeding threshold, transitions to running.
 		if err := sync(ctx, ft, queries, homeDir, cacheDir, state); err != nil {
 			t.Fatal(err)
 		}
@@ -534,7 +578,7 @@ func TestSync(t *testing.T) {
 			t.Fatal(err)
 		}
 		if got != "running" {
-			t.Errorf("got %q, want running (future JSONL entries should trigger transition)", got)
+			t.Errorf("got %q, want running (JSONL entries after threshold should trigger transition)", got)
 		}
 	})
 
@@ -572,24 +616,19 @@ func TestSync(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Step 2: PermissionRequest hook fires → status = waiting, updated_at = now
+		// Step 2: PermissionRequest hook fires → status = waiting with known WaitingSince.
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: "2090-01-01T00:00:00.000Z", WaitingSince: "2090-01-01T00:00:00.000Z",
 		}); err != nil {
 			t.Fatal(err)
 		}
 
-		// Step 3: First sync in waiting state — records baseline from existing JSONL entries.
-		if err := sync(ctx, ft, queries, homeDir, cacheDir, state); err != nil {
-			t.Fatal(err)
-		}
-
-		// Step 4: User approves → Claude writes a new JSONL entry with a future timestamp
+		// Step 3: User approves → Claude writes a new JSONL entry >2s after WaitingSince.
 		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
 			`{"uuid":"uuid-1","timestamp":"2000-01-01T00:00:01.000Z"}`+"\n"+
-				`{"uuid":"uuid-2","timestamp":"2099-01-01T00:00:01.000Z"}`+"\n")
+				`{"uuid":"uuid-2","timestamp":"2090-01-01T00:00:05.000Z"}`+"\n")
 
-		// Step 5: Sync again — detects new entry after baseline, transitions to running.
+		// Step 4: Sync detects JSONL timestamp exceeding threshold, transitions to running.
 		if err := sync(ctx, ft, queries, homeDir, cacheDir, state); err != nil {
 			t.Fatal(err)
 		}
@@ -1192,7 +1231,7 @@ func TestSync(t *testing.T) {
 		}
 	})
 
-	t.Run("JSONL transition takes priority over capture-pane", func(t *testing.T) {
+	t.Run("JSONL heuristic blocked when capture-pane shows prompt", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		ft := &fakeTmux{
@@ -1206,7 +1245,7 @@ func TestSync(t *testing.T) {
 		cacheDir := t.TempDir()
 
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: "2090-01-01T00:00:00.000Z", WaitingSince: "2090-01-01T00:00:00.000Z",
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1221,24 +1260,61 @@ func TestSync(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		state := newMonitorState()
-
-		// Write initial JSONL to establish baseline.
+		// Write JSONL entry >2s after WaitingSince.
 		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
-			`{"uuid":"uuid-1","timestamp":"2098-01-01T00:00:01.000Z"}`+"\n")
+			`{"uuid":"uuid-1","timestamp":"2090-01-01T00:00:05.000Z"}`+"\n")
 
-		// First sync: records baseline. Capture-pane shows prompt, stays waiting.
-		if err := sync(ctx, ft, queries, homeDir, cacheDir, state); err != nil {
+		// JSONL heuristic triggers but capture-pane guard sees prompt is visible — status stays waiting.
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
-		// Write newer JSONL entry.
-		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
-			`{"uuid":"uuid-1","timestamp":"2098-01-01T00:00:01.000Z"}`+"\n"+
-				`{"uuid":"uuid-2","timestamp":"2099-01-01T00:00:01.000Z"}`+"\n")
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "waiting" {
+			t.Errorf("got %q, want waiting (capture-pane guard should block JSONL heuristic)", got)
+		}
+	})
 
-		// Second sync: JSONL transition fires even though capture-pane still shows prompt.
-		if err := sync(ctx, ft, queries, homeDir, cacheDir, state); err != nil {
+	t.Run("JSONL heuristic transitions when capture-pane shows no prompt", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		ft := &fakeTmux{
+			sessions: map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{
+				"muxac-default@home@user@project": "some normal output\n",
+			},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+		cacheDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: "2090-01-01T00:00:00.000Z", WaitingSince: "2090-01-01T00:00:00.000Z",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// Write JSONL entry >2s after WaitingSince.
+		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
+			`{"uuid":"uuid-1","timestamp":"2090-01-01T00:00:05.000Z"}`+"\n")
+
+		// JSONL heuristic triggers and capture-pane shows no prompt — transitions to running.
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1249,7 +1325,7 @@ func TestSync(t *testing.T) {
 			t.Fatal(err)
 		}
 		if got != "running" {
-			t.Errorf("got %q, want running (JSONL transition should take priority)", got)
+			t.Errorf("got %q, want running (JSONL heuristic should transition when no prompt visible)", got)
 		}
 	})
 

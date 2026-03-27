@@ -17,6 +17,7 @@ func TestFromEvent(t *testing.T) {
 	}{
 		{name: "UserPromptSubmit", event: "UserPromptSubmit", want: status.Running, wantOK: true},
 		{name: "PreToolUse", event: "PreToolUse", want: status.Running, wantOK: true},
+		{name: "PostToolUse", event: "PostToolUse", want: status.Running, wantOK: true},
 		{name: "PermissionRequest", event: "PermissionRequest", want: status.Waiting, wantOK: true},
 		{name: "Stop", event: "Stop", want: status.Idle, wantOK: true},
 		{name: "SessionStart", event: "SessionStart", want: status.Idle, wantOK: true},
@@ -52,6 +53,7 @@ func TestIsValidTransition(t *testing.T) {
 		{name: "unknown + Stop", current: status.Unknown, event: "Stop", want: true},
 		{name: "waiting + Stop blocked", current: status.Waiting, event: "Stop", want: false},
 		{name: "waiting + PreToolUse blocked", current: status.Waiting, event: "PreToolUse", want: false},
+		{name: "waiting + PostToolUse allowed", current: status.Waiting, event: "PostToolUse", want: true},
 		{name: "waiting + UserPromptSubmit", current: status.Waiting, event: "UserPromptSubmit", want: true},
 		{name: "waiting + SessionEnd", current: status.Waiting, event: "SessionEnd", want: true},
 		{name: "waiting + SessionStart", current: status.Waiting, event: "SessionStart", want: true},

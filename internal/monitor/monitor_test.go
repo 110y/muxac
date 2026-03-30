@@ -1355,11 +1355,12 @@ func TestSync(t *testing.T) {
 
 		// CAS should be a no-op because status is now "idle", not "waiting"
 		if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
-			Status:    "running",
-			UpdatedAt: timestamp.Now(),
-			Name:      "default",
-			Path:      "/home/user/project",
-			Status_2:  "waiting",
+			Status:       "running",
+			UpdatedAt:    timestamp.Now(),
+			WaitingSince: "",
+			Name:         "default",
+			Path:         "/home/user/project",
+			Status_2:     "waiting",
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1662,44 +1663,7 @@ func TestSyncGemini_OldCancellation_StatusUnchanged(t *testing.T) {
 func TestSyncCodex(t *testing.T) {
 	t.Parallel()
 
-	t.Run("task_started transitions to running", func(t *testing.T) {
-		t.Parallel()
-		ctx := t.Context()
-		cacheDir := t.TempDir()
-		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
-		queries := database.SetupTestDB(t)
-		homeDir := t.TempDir()
-
-		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "idle", UpdatedAt: timestamp.Now(),
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
-			AgentTool: "codex", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
-		}); err != nil {
-			t.Fatal(err)
-		}
-
-		writeCodexLog(t, cacheDir,
-			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"task_started","turn_id":"t1"}}}`+"\n")
-
-		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
-			t.Fatal(err)
-		}
-
-		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
-			Name: "default", Path: "/home/user/project",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got != "running" {
-			t.Errorf("got %q, want running", got)
-		}
-	})
-
-	t.Run("task_complete transitions to idle", func(t *testing.T) {
+	t.Run("FullScreenApprovalRequest transitions to waiting", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		cacheDir := t.TempDir()
@@ -1718,156 +1682,10 @@ func TestSyncCodex(t *testing.T) {
 			t.Fatal(err)
 		}
 
+		// Codex TUI logs all approval types (exec, patch, permissions, user input,
+		// elicitation, dynamic tool calls) as AppEvent::FullScreenApprovalRequest.
 		writeCodexLog(t, cacheDir,
-			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"task_complete","turn_id":"t1"}}}`+"\n")
-
-		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
-			t.Fatal(err)
-		}
-
-		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
-			Name: "default", Path: "/home/user/project",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got != "idle" {
-			t.Errorf("got %q, want idle", got)
-		}
-	})
-
-	t.Run("exec_approval_request transitions to waiting", func(t *testing.T) {
-		t.Parallel()
-		ctx := t.Context()
-		cacheDir := t.TempDir()
-		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
-		queries := database.SetupTestDB(t)
-		homeDir := t.TempDir()
-
-		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
-			AgentTool: "codex", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
-		}); err != nil {
-			t.Fatal(err)
-		}
-
-		writeCodexLog(t, cacheDir,
-			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"exec_approval_request","call_id":"c1","command":"ls"}}}`+"\n")
-
-		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
-			t.Fatal(err)
-		}
-
-		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
-			Name: "default", Path: "/home/user/project",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got != "waiting" {
-			t.Errorf("got %q, want waiting", got)
-		}
-	})
-
-	t.Run("apply_patch_approval_request transitions to waiting", func(t *testing.T) {
-		t.Parallel()
-		ctx := t.Context()
-		cacheDir := t.TempDir()
-		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
-		queries := database.SetupTestDB(t)
-		homeDir := t.TempDir()
-
-		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
-			AgentTool: "codex", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
-		}); err != nil {
-			t.Fatal(err)
-		}
-
-		writeCodexLog(t, cacheDir,
-			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"apply_patch_approval_request","call_id":"c1","turn_id":"t1"}}}`+"\n")
-
-		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
-			t.Fatal(err)
-		}
-
-		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
-			Name: "default", Path: "/home/user/project",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got != "waiting" {
-			t.Errorf("got %q, want waiting", got)
-		}
-	})
-
-	t.Run("request_permissions transitions to waiting", func(t *testing.T) {
-		t.Parallel()
-		ctx := t.Context()
-		cacheDir := t.TempDir()
-		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
-		queries := database.SetupTestDB(t)
-		homeDir := t.TempDir()
-
-		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
-			AgentTool: "codex", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
-		}); err != nil {
-			t.Fatal(err)
-		}
-
-		writeCodexLog(t, cacheDir,
-			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"request_permissions"}}}`+"\n")
-
-		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
-			t.Fatal(err)
-		}
-
-		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
-			Name: "default", Path: "/home/user/project",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got != "waiting" {
-			t.Errorf("got %q, want waiting", got)
-		}
-	})
-
-	t.Run("request_user_input transitions to waiting", func(t *testing.T) {
-		t.Parallel()
-		ctx := t.Context()
-		cacheDir := t.TempDir()
-		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
-		queries := database.SetupTestDB(t)
-		homeDir := t.TempDir()
-
-		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
-			AgentTool: "codex", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
-		}); err != nil {
-			t.Fatal(err)
-		}
-
-		writeCodexLog(t, cacheDir,
-			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"request_user_input"}}}`+"\n")
+			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"app_event","variant":"FullScreenApprovalRequest"}`+"\n")
 
 		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
@@ -1958,81 +1776,7 @@ func TestSyncCodex(t *testing.T) {
 		}
 	})
 
-	t.Run("turn_aborted transitions to idle", func(t *testing.T) {
-		t.Parallel()
-		ctx := t.Context()
-		cacheDir := t.TempDir()
-		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
-		queries := database.SetupTestDB(t)
-		homeDir := t.TempDir()
-
-		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
-			AgentTool: "codex", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
-		}); err != nil {
-			t.Fatal(err)
-		}
-
-		writeCodexLog(t, cacheDir,
-			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"turn_aborted","turn_id":"t1"}}}`+"\n")
-
-		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
-			t.Fatal(err)
-		}
-
-		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
-			Name: "default", Path: "/home/user/project",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got != "idle" {
-			t.Errorf("got %q, want idle", got)
-		}
-	})
-
-	t.Run("shutdown_complete transitions to idle", func(t *testing.T) {
-		t.Parallel()
-		ctx := t.Context()
-		cacheDir := t.TempDir()
-		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
-		queries := database.SetupTestDB(t)
-		homeDir := t.TempDir()
-
-		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
-			AgentTool: "codex", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
-		}); err != nil {
-			t.Fatal(err)
-		}
-
-		writeCodexLog(t, cacheDir,
-			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"shutdown_complete"}}}`+"\n")
-
-		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
-			t.Fatal(err)
-		}
-
-		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
-			Name: "default", Path: "/home/user/project",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got != "idle" {
-			t.Errorf("got %q, want idle", got)
-		}
-	})
-
-	t.Run("interrupt during waiting results in idle via turn_aborted", func(t *testing.T) {
+	t.Run("interrupt during waiting results in idle via abort", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		cacheDir := t.TempDir()
@@ -2051,11 +1795,10 @@ func TestSyncCodex(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Simulates: approval request → user Ctrl+C → exec_approval (abort) → turn_aborted
+		// Simulates: approval request → user Ctrl+C → exec_approval (abort)
 		writeCodexLog(t, cacheDir,
-			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"exec_approval_request","call_id":"c1","command":"ls"}}}`+"\n"+
-				`{"ts":"2099-01-01T00:00:02.000Z","dir":"from_tui","kind":"op","payload":{"type":"exec_approval","id":"c1","decision":"abort"}}`+"\n"+
-				`{"ts":"2099-01-01T00:00:03.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"turn_aborted","turn_id":"t1"}}}`+"\n")
+			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"app_event","variant":"FullScreenApprovalRequest"}`+"\n"+
+				`{"ts":"2099-01-01T00:00:02.000Z","dir":"from_tui","kind":"op","payload":{"type":"exec_approval","id":"c1","decision":"abort"}}`+"\n")
 
 		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
@@ -2092,7 +1835,7 @@ func TestSyncCodex(t *testing.T) {
 		}
 
 		writeCodexLog(t, cacheDir,
-			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"exec_approval_request","call_id":"c1","command":"ls"}}}`+"\n"+
+			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"app_event","variant":"FullScreenApprovalRequest"}`+"\n"+
 				`{"ts":"2099-01-01T00:00:02.000Z","dir":"from_tui","kind":"op","payload":{"type":"exec_approval","id":"c1","decision":"approved"}}`+"\n")
 
 		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
@@ -2130,7 +1873,7 @@ func TestSyncCodex(t *testing.T) {
 		}
 
 		writeCodexLog(t, cacheDir,
-			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"exec_approval_request","call_id":"c1","command":"ls"}}}`+"\n"+
+			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"app_event","variant":"FullScreenApprovalRequest"}`+"\n"+
 				`{"ts":"2099-01-01T00:00:02.000Z","dir":"from_tui","kind":"op","payload":{"type":"exec_approval","id":"c1","decision":"abort"}}`+"\n")
 
 		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
@@ -2242,7 +1985,7 @@ func TestSyncCodex(t *testing.T) {
 		}
 
 		writeCodexLog(t, cacheDir,
-			`{"ts":"2000-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"task_started","turn_id":"t1"}}}`+"\n")
+			`{"ts":"2000-01-01T00:00:01.000Z","dir":"to_tui","kind":"app_event","variant":"FullScreenApprovalRequest"}`+"\n")
 
 		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
@@ -2279,8 +2022,8 @@ func TestSyncCodex(t *testing.T) {
 		}
 
 		writeCodexLog(t, cacheDir,
-			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"task_started","turn_id":"t1"}}}`+"\n"+
-				`{"ts":"2099-01-01T00:00:02.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"exec_approval_request","call_id":"c1","command":"ls"}}}`+"\n")
+			`{"ts":"2099-01-01T00:00:01.000Z","dir":"from_tui","kind":"op","payload":{"type":"user_turn"}}`+"\n"+
+				`{"ts":"2099-01-01T00:00:02.000Z","dir":"to_tui","kind":"app_event","variant":"FullScreenApprovalRequest"}`+"\n")
 
 		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
@@ -2317,7 +2060,7 @@ func TestSyncCodex(t *testing.T) {
 		}
 
 		writeCodexLog(t, cacheDir,
-			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"task_started","turn_id":"t1"}}}`+"\n")
+			`{"ts":"2099-01-01T00:00:01.000Z","dir":"from_tui","kind":"op","payload":{"type":"user_turn"}}`+"\n")
 
 		logPath := filepath.Join(cacheDir, "codex", "sessions", "muxac-default@home@user@project.jsonl")
 		if _, err := os.Stat(logPath); err != nil {
@@ -2378,7 +2121,7 @@ func TestSyncCodex(t *testing.T) {
 		}
 		// No agent_tool set, but codex log file exists → should auto-detect as Codex
 		writeCodexLog(t, cacheDir,
-			`{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"task_started","turn_id":"t1"}}}`+"\n")
+			`{"ts":"2099-01-01T00:00:01.000Z","dir":"from_tui","kind":"op","payload":{"type":"user_turn"}}`+"\n")
 
 		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
 			t.Fatal(err)
@@ -2425,11 +2168,12 @@ func TestSyncCodex(t *testing.T) {
 
 		// CAS should be a no-op because status is now "waiting", not "running"
 		if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
-			Status:    "idle",
-			UpdatedAt: timestamp.Now(),
-			Name:      "default",
-			Path:      "/home/user/project",
-			Status_2:  "running",
+			Status:       "idle",
+			UpdatedAt:    timestamp.Now(),
+			WaitingSince: "",
+			Name:         "default",
+			Path:         "/home/user/project",
+			Status_2:     "running",
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -2444,6 +2188,305 @@ func TestSyncCodex(t *testing.T) {
 			t.Errorf("got %q, want waiting (CAS should be no-op)", got)
 		}
 	})
+
+	t.Run("capture-pane detects codex approval prompt and transitions to waiting", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		cacheDir := t.TempDir()
+		ft := &fakeTmux{
+			sessions: map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{
+				"muxac-default@home@user@project": "Some output\n  Would you like to run the following command?\n  ls -la\n  Allow once   Allow for this session   Deny\n",
+			},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "codex", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// Empty log file so auto-detection works but no JSONL events match.
+		writeCodexLog(t, cacheDir, "\n")
+
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, newMonitorState()); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "waiting" {
+			t.Errorf("got %q, want waiting (capture-pane should detect codex approval prompt)", got)
+		}
+	})
+
+	t.Run("capture-pane codex waiting reverts to running after prompt dismissed", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		cacheDir := t.TempDir()
+		ft := &fakeTmux{
+			sessions: map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{
+				"muxac-default@home@user@project": "Processing files...\nDone.\n",
+			},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "codex", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		writeCodexLog(t, cacheDir, "\n")
+
+		// Prompt was previously seen, and now it's gone.
+		state := newMonitorState()
+		state.capturePromptSeen["default:/home/user/project"] = true
+
+		// First sync: clear count = 1 (debounce)
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, state); err != nil {
+			t.Fatal(err)
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "waiting" {
+			t.Errorf("after 1st sync: got %q, want waiting (debounce)", got)
+		}
+
+		// Second sync: clear count = 2 → transitions to running
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, state); err != nil {
+			t.Fatal(err)
+		}
+		got, err = queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "running" {
+			t.Errorf("after 2nd sync: got %q, want running (prompt dismissed)", got)
+		}
+	})
+
+	t.Run("capture-pane idle prompt transitions running to idle", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		cacheDir := t.TempDir()
+		ft := &fakeTmux{
+			sessions: map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{
+				"muxac-default@home@user@project": "Agent output...\nDone.\n  Ask Codex to do anything\n",
+			},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "codex", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		writeCodexLog(t, cacheDir, "\n")
+
+		state := newMonitorState()
+
+		// First sync: idle prompt detected, counter = 1 (debounce)
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, state); err != nil {
+			t.Fatal(err)
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "running" {
+			t.Errorf("after 1st sync: got %q, want running (debounce)", got)
+		}
+
+		// Second sync: counter = 2 → transitions to idle
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, state); err != nil {
+			t.Fatal(err)
+		}
+		got, err = queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "idle" {
+			t.Errorf("after 2nd sync: got %q, want idle (idle prompt visible)", got)
+		}
+	})
+
+	t.Run("working indicator keeps status running", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		cacheDir := t.TempDir()
+		ft := &fakeTmux{
+			sessions: map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{
+				// Codex shows both "Ask Codex" and "esc to interrupt" while running.
+				"muxac-default@home@user@project": "• Working (3s • esc to interrupt)\n\n› Ask Codex to do anything\n\n  ? for shortcuts            100% context left\n",
+			},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "codex", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		writeCodexLog(t, cacheDir, "\n")
+
+		state := newMonitorState()
+		for i := 0; i < 5; i++ {
+			if err := sync(ctx, ft, queries, homeDir, cacheDir, state); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "running" {
+			t.Errorf("got %q, want running (working indicator should prevent idle transition)", got)
+		}
+	})
+}
+
+func TestTerminalShowsCodexIdlePrompt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			name:   "idle - no working indicator",
+			output: "Previous output\n› Ask Codex to do anything\n  ? for shortcuts  100% context left\n",
+			want:   true,
+		},
+		{
+			name:   "idle - agent output without working indicator",
+			output: "Here is the result of your task.\nDone.\n  ? for shortcuts  100% context left\n",
+			want:   true,
+		},
+		{
+			name:   "running - working indicator present",
+			output: "• Working (3s • esc to interrupt)\n\n› Ask Codex to do anything\n  ? for shortcuts  100% context left\n",
+			want:   false,
+		},
+		{
+			name:   "empty output",
+			output: "",
+			want:   false,
+		},
+		{
+			name:   "whitespace only",
+			output: "   \n   \n   \n",
+			want:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := terminalShowsCodexIdlePrompt(tt.output)
+			if got != tt.want {
+				t.Errorf("terminalShowsCodexIdlePrompt() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTerminalShowsCodexWaitingPrompt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			name:   "exec approval prompt",
+			output: "Some output\n  Would you like to run the following command?\n  ls -la\n  Allow once   Allow for this session   Deny\n",
+			want:   true,
+		},
+		{
+			name:   "network approval prompt",
+			output: "Connecting...\n  Do you want to approve network access to \"api.example.com\"?\n  Allow once   Deny\n",
+			want:   true,
+		},
+		{
+			name:   "permissions prompt",
+			output: "  Would you like to grant these permissions?\n  Allow once   Deny\n",
+			want:   true,
+		},
+		{
+			name:   "patch approval prompt",
+			output: "  Would you like to apply this patch?\n  Allow once   Always allow   Deny\n",
+			want:   true,
+		},
+		{
+			name:   "no approval prompt",
+			output: "Processing files...\nDone.\n$ ",
+			want:   false,
+		},
+		{
+			name:   "empty output",
+			output: "",
+			want:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := terminalShowsCodexWaitingPrompt(tt.output)
+			if got != tt.want {
+				t.Errorf("terminalShowsCodexWaitingPrompt() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestReadLastLines(t *testing.T) {
@@ -2581,8 +2624,8 @@ func TestReadLastLines(t *testing.T) {
 func TestFindLastCodexStatus(t *testing.T) {
 	t.Parallel()
 
-	taskStarted := `{"ts":"2099-01-01T00:00:01.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"task_started","turn_id":"t1"}}}`
-	taskComplete := `{"ts":"2099-01-01T00:00:02.000Z","dir":"to_tui","kind":"codex_event","payload":{"id":"sub-1","msg":{"type":"task_complete"}}}`
+	taskStarted := `{"ts":"2099-01-01T00:00:01.000Z","dir":"from_tui","kind":"op","payload":{"type":"user_turn"}}`
+	taskComplete := `{"ts":"2099-01-01T00:00:02.000Z","dir":"meta","kind":"session_end"}`
 	nonStatus := `{"ts":"2099-01-01T00:00:01.500Z","dir":"to_tui","kind":"some_other_event","payload":{}}`
 
 	t.Run("status event found among last lines", func(t *testing.T) {

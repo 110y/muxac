@@ -169,22 +169,24 @@ func (q *Queries) UpdateAgentTool(ctx context.Context, arg UpdateAgentToolParams
 }
 
 const updateSessionStatusIfUnchanged = `-- name: UpdateSessionStatusIfUnchanged :exec
-UPDATE sessions SET status = ?, updated_at = ?, waiting_since = ''
+UPDATE sessions SET status = ?, updated_at = ?, waiting_since = ?
 WHERE name = ? AND path = ? AND status = ?
 `
 
 type UpdateSessionStatusIfUnchangedParams struct {
-	Status    string
-	UpdatedAt string
-	Name      string
-	Path      string
-	Status_2  string
+	Status       string
+	UpdatedAt    string
+	WaitingSince string
+	Name         string
+	Path         string
+	Status_2     string
 }
 
 func (q *Queries) UpdateSessionStatusIfUnchanged(ctx context.Context, arg UpdateSessionStatusIfUnchangedParams) error {
 	_, err := q.db.ExecContext(ctx, updateSessionStatusIfUnchanged,
 		arg.Status,
 		arg.UpdatedAt,
+		arg.WaitingSince,
 		arg.Name,
 		arg.Path,
 		arg.Status_2,

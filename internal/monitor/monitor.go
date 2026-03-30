@@ -178,7 +178,7 @@ func syncSession(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Quer
 
 	switch tool {
 	case agent.Codex:
-		return syncCodexSession(ctx, queries, cacheDir, sess, tmuxName)
+		return syncCodexSession(ctx, queries, cacheDir, sess, tmuxRunner, tmuxName, state)
 	case agent.Claude:
 		return syncClaudeCodeSession(ctx, queries, homeDir, sess, tmuxRunner, tmuxName, state)
 	case agent.Gemini:
@@ -283,11 +283,12 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 				st := status.Status(sess.Status)
 				if st == status.Running || st == status.Waiting {
 					if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
-						Status:    string(status.Idle),
-						UpdatedAt: timestamp.Now(),
-						Name:      sess.Name,
-						Path:      sess.Path,
-						Status_2:  string(st),
+						Status:       string(status.Idle),
+						UpdatedAt:    timestamp.Now(),
+						WaitingSince: "",
+						Name:         sess.Name,
+						Path:         sess.Path,
+						Status_2:     string(st),
 					}); err != nil {
 						return fmt.Errorf("update status to idle: %w", err)
 					}
@@ -310,11 +311,12 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 							return nil
 						}
 						if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
-							Status:    string(status.Running),
-							UpdatedAt: timestamp.Now(),
-							Name:      sess.Name,
-							Path:      sess.Path,
-							Status_2:  string(st),
+							Status:       string(status.Running),
+							UpdatedAt:    timestamp.Now(),
+							WaitingSince: "",
+							Name:         sess.Name,
+							Path:         sess.Path,
+							Status_2:     string(st),
 						}); err != nil {
 							return fmt.Errorf("update status to running: %w", err)
 						}
@@ -360,11 +362,12 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 
 	delete(state.capturePaneClearCount, sessionKey)
 	if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
-		Status:    string(status.Running),
-		UpdatedAt: timestamp.Now(),
-		Name:      sess.Name,
-		Path:      sess.Path,
-		Status_2:  string(st),
+		Status:       string(status.Running),
+		UpdatedAt:    timestamp.Now(),
+		WaitingSince: "",
+		Name:         sess.Name,
+		Path:         sess.Path,
+		Status_2:     string(st),
 	}); err != nil {
 		return fmt.Errorf("update status to running via capture-pane: %w", err)
 	}
@@ -412,6 +415,59 @@ func terminalShowsWaitingPrompt(output string) bool {
 		}
 	}
 	return false
+}
+
+// terminalShowsCodexWaitingPrompt checks if the captured terminal output contains
+// patterns indicating a Codex approval/permission prompt is visible.
+func terminalShowsCodexWaitingPrompt(output string) bool {
+	output = strings.ReplaceAll(output, "\u00a0", " ")
+
+	allLines := strings.Split(output, "\n")
+	var nonEmpty []string
+	for _, l := range allLines {
+		trimmed := strings.TrimSpace(l)
+		if trimmed != "" {
+			nonEmpty = append(nonEmpty, trimmed)
+		}
+	}
+	if len(nonEmpty) > 15 {
+		nonEmpty = nonEmpty[len(nonEmpty)-15:]
+	}
+
+	lower := strings.ToLower(strings.Join(nonEmpty, "\n"))
+
+	patterns := []string{
+		"would you like to run the following command",
+		"do you want to approve network access",
+		"would you like to grant these permissions",
+		"would you like to apply this patch",
+		"allow once",
+		"allow for this session",
+		"always allow",
+	}
+	for _, p := range patterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// terminalShowsCodexIdlePrompt checks if the captured terminal output indicates
+// the Codex agent has finished processing. The Codex TUI renders
+// "esc to interrupt" only while the agent is actively working. Its absence,
+// combined with the presence of any TUI content, indicates the agent is idle.
+func terminalShowsCodexIdlePrompt(output string) bool {
+	output = strings.ReplaceAll(output, "\u00a0", " ")
+	lower := strings.ToLower(output)
+
+	// Require some non-empty content to confirm the TUI is rendered.
+	if strings.TrimSpace(lower) == "" {
+		return false
+	}
+
+	// The "esc to interrupt" hint is rendered only while the agent is busy.
+	return !strings.Contains(lower, "esc to interrupt")
 }
 
 // readTail reads the last n bytes from a file. If the file is smaller than n,
@@ -524,11 +580,12 @@ func syncGeminiSession(ctx context.Context, queries *sqlc.Queries, homeDir strin
 	}
 
 	return queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
-		Status:    string(status.Idle),
-		UpdatedAt: timestamp.Now(),
-		Name:      sess.Name,
-		Path:      sess.Path,
-		Status_2:  string(st),
+		Status:       string(status.Idle),
+		UpdatedAt:    timestamp.Now(),
+		WaitingSince: "",
+		Name:         sess.Name,
+		Path:         sess.Path,
+		Status_2:     string(st),
 	})
 }
 
@@ -536,22 +593,12 @@ type codexLogLine struct {
 	Ts      string          `json:"ts"`
 	Dir     string          `json:"dir"`
 	Kind    string          `json:"kind"`
+	Variant string          `json:"variant"`
 	Payload json.RawMessage `json:"payload"`
 }
 
-// codexEventMsg is the internally-tagged msg inside a codex_event payload.
-// Codex uses #[serde(tag = "type", rename_all = "snake_case")].
-type codexEventMsg struct {
-	Type string `json:"type"`
-}
-
-// codexEventPayload is the payload of a codex_event log line.
-// It wraps an Event struct with id + msg fields.
-type codexEventPayload struct {
-	Msg codexEventMsg `json:"msg"`
-}
-
 // codexOpPayload is the internally-tagged payload of an op log line.
+// Codex Op uses #[serde(tag = "type", rename_all = "snake_case")].
 type codexOpPayload struct {
 	Type     string `json:"type"`
 	Decision string `json:"decision"`
@@ -561,17 +608,10 @@ func codexEventToStatus(line codexLogLine) (status.Status, bool) {
 	switch line.Kind {
 	case "session_end":
 		return status.Idle, true
-	case "codex_event":
-		var p codexEventPayload
-		if json.Unmarshal(line.Payload, &p) != nil {
-			return "", false
-		}
-		switch p.Msg.Type {
-		case "task_started", "turn_started":
-			return status.Running, true
-		case "task_complete", "turn_complete", "turn_aborted", "shutdown_complete":
-			return status.Idle, true
-		case "exec_approval_request", "apply_patch_approval_request", "request_permissions", "request_user_input":
+	case "app_event":
+		// Codex TUI logs approval/permission requests as AppEvent::FullScreenApprovalRequest,
+		// which appears as kind "app_event" with variant "FullScreenApprovalRequest".
+		if line.Variant == "FullScreenApprovalRequest" {
 			return status.Waiting, true
 		}
 	case "op":
@@ -580,7 +620,10 @@ func codexEventToStatus(line codexLogLine) (status.Status, bool) {
 			return "", false
 		}
 		switch op.Type {
-		case "user_input", "user_turn":
+		case "user_input", "user_turn",
+			"user_input_answer", "request_user_input_response",
+			"resolve_elicitation", "dynamic_tool_response",
+			"request_permissions_response":
 			return status.Running, true
 		case "interrupt":
 			return status.Idle, true
@@ -664,34 +707,115 @@ func findLastCodexStatus(filePath string) (status.Status, string, error) {
 	return "", "", nil
 }
 
-func syncCodexSession(ctx context.Context, queries *sqlc.Queries, cacheDir string, sess sqlc.ListSessionsRow, tmuxName string) error {
+func syncCodexSession(ctx context.Context, queries *sqlc.Queries, cacheDir string, sess sqlc.ListSessionsRow, tmuxRunner tmux.Runner, tmuxName string, state *monitorState) error {
 	logPath := agent.CodexSessionLogPath(cacheDir, tmuxName)
+	st := status.Status(sess.Status)
+	sessionKey := sess.Name + ":" + sess.Path
 
+	// JSONL-based detection: check for ops (user_turn, exec_approval, etc.)
 	lastStatus, lastTs, err := findLastCodexStatus(logPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
+	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read codex session log %q: %w", logPath, err)
 	}
 
-	if lastStatus == "" {
+	if lastStatus != "" && isAfter(lastTs, sess.UpdatedAt) && lastStatus != st {
+		var waitingSince string
+		if lastStatus == status.Waiting {
+			waitingSince = timestamp.Now()
+		}
+		if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
+			Status:       string(lastStatus),
+			UpdatedAt:    timestamp.Now(),
+			WaitingSince: waitingSince,
+			Name:         sess.Name,
+			Path:         sess.Path,
+			Status_2:     sess.Status,
+		}); err != nil {
+			return fmt.Errorf("update codex status via log: %w", err)
+		}
+		delete(state.capturePaneClearCount, sessionKey)
+		delete(state.capturePromptSeen, sessionKey)
 		return nil
 	}
 
-	if !isAfter(lastTs, sess.UpdatedAt) {
-		return nil
+	// Capture-pane detection: approval requests and turn completions are not
+	// logged to the JSONL file, so use terminal content and file staleness.
+	if st == status.Running {
+		output, cpErr := tmuxRunner.CapturePane(ctx, tmuxName)
+		if cpErr != nil {
+			return nil
+		}
+		if terminalShowsCodexWaitingPrompt(output) {
+			if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
+				Status:       string(status.Waiting),
+				UpdatedAt:    timestamp.Now(),
+				WaitingSince: timestamp.Now(),
+				Name:         sess.Name,
+				Path:         sess.Path,
+				Status_2:     string(st),
+			}); err != nil {
+				return fmt.Errorf("update codex status to waiting via capture-pane: %w", err)
+			}
+			state.capturePromptSeen[sessionKey] = true
+			state.capturePaneClearCount[sessionKey] = 0
+			return nil
+		}
+
+		// Idle detection: when the agent finishes a turn, the Codex TUI shows
+		// the chat composer with its placeholder text. This text is only
+		// rendered when the agent is not running.
+		if terminalShowsCodexIdlePrompt(output) {
+			state.capturePaneClearCount[sessionKey]++
+			if state.capturePaneClearCount[sessionKey] >= 2 {
+				delete(state.capturePaneClearCount, sessionKey)
+				delete(state.capturePromptSeen, sessionKey)
+				if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
+					Status:       string(status.Idle),
+					UpdatedAt:    timestamp.Now(),
+					WaitingSince: "",
+					Name:         sess.Name,
+					Path:         sess.Path,
+					Status_2:     string(st),
+				}); err != nil {
+					return fmt.Errorf("update codex status to idle via capture-pane: %w", err)
+				}
+			}
+			return nil
+		}
+		state.capturePaneClearCount[sessionKey] = 0
 	}
 
-	if lastStatus == status.Status(sess.Status) {
-		return nil
+	// When waiting, check if the approval prompt has been dismissed.
+	if st == status.Waiting {
+		output, cpErr := tmuxRunner.CapturePane(ctx, tmuxName)
+		if cpErr != nil {
+			return nil
+		}
+		if terminalShowsCodexWaitingPrompt(output) {
+			state.capturePaneClearCount[sessionKey] = 0
+			state.capturePromptSeen[sessionKey] = true
+			return nil
+		}
+		if !state.capturePromptSeen[sessionKey] {
+			return nil
+		}
+		state.capturePaneClearCount[sessionKey]++
+		if state.capturePaneClearCount[sessionKey] < 2 {
+			return nil
+		}
+		delete(state.capturePaneClearCount, sessionKey)
+		delete(state.capturePromptSeen, sessionKey)
+		if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
+			Status:       string(status.Running),
+			UpdatedAt:    timestamp.Now(),
+			WaitingSince: "",
+			Name:         sess.Name,
+			Path:         sess.Path,
+			Status_2:     string(st),
+		}); err != nil {
+			return fmt.Errorf("update codex status to running via capture-pane: %w", err)
+		}
 	}
 
-	return queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
-		Status:    string(lastStatus),
-		UpdatedAt: timestamp.Now(),
-		Name:      sess.Name,
-		Path:      sess.Path,
-		Status_2:  sess.Status,
-	})
+	return nil
 }

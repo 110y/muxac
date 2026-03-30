@@ -13,7 +13,7 @@ SELECT status FROM sessions WHERE name = ? AND path = ?;
 SELECT name, path, status, agent_session_id, agent_tool, updated_at, waiting_since FROM sessions;
 
 -- name: UpdateSessionStatusIfUnchanged :exec
-UPDATE sessions SET status = ?, updated_at = ?, waiting_since = ''
+UPDATE sessions SET status = ?, updated_at = ?, waiting_since = ?
 WHERE name = ? AND path = ? AND status = ?;
 
 -- name: UpdateAgentSessionID :exec

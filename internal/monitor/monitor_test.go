@@ -1660,6 +1660,161 @@ func TestSyncGemini_OldCancellation_StatusUnchanged(t *testing.T) {
 	}
 }
 
+func TestSyncGemini_WaitingToRunningViaCapturePaneWhenPromptDismissed(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	cacheDir := t.TempDir()
+	ft := &fakeTmux{
+		sessions:           map[string]bool{"muxac-default@home@user@project": true},
+		capturePaneOutputs: map[string]string{"muxac-default@home@user@project": "Action Required\n? Shell Command  echo hello\nAllow once\nAllow for this session\nNo, suggest changes (esc)\n"},
+	}
+	queries := database.SetupTestDB(t)
+	homeDir := t.TempDir()
+
+	if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+		Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+		AgentTool: "gemini", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+		AgentSessionID: "abcdefgh-1234", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	state := newMonitorState()
+
+	// First sync: prompt is visible, capturePromptSeen is set.
+	if err := sync(ctx, ft, queries, homeDir, cacheDir, state); err != nil {
+		t.Fatal(err)
+	}
+
+	// Prompt disappears (user approved).
+	ft.capturePaneOutputs["muxac-default@home@user@project"] = "Processing files...\n"
+
+	// Second sync: prompt gone, counter=1 (debounce).
+	if err := sync(ctx, ft, queries, homeDir, cacheDir, state); err != nil {
+		t.Fatal(err)
+	}
+
+	// Third sync: prompt still gone, counter=2 → transition to running.
+	if err := sync(ctx, ft, queries, homeDir, cacheDir, state); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+		Name: "default", Path: "/home/user/project",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "running" {
+		t.Errorf("status = %q, want %q", got, "running")
+	}
+}
+
+func TestSyncGemini_WaitingStaysWhenPromptVisible(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	cacheDir := t.TempDir()
+	ft := &fakeTmux{
+		sessions:           map[string]bool{"muxac-default@home@user@project": true},
+		capturePaneOutputs: map[string]string{"muxac-default@home@user@project": "Action Required\n? Shell Command  echo hello\nAllow once\nAllow for this session\nNo, suggest changes (esc)\n"},
+	}
+	queries := database.SetupTestDB(t)
+	homeDir := t.TempDir()
+
+	if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+		Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+		AgentTool: "gemini", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+		AgentSessionID: "abcdefgh-1234", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	state := newMonitorState()
+
+	// Multiple syncs with prompt visible should keep status as waiting.
+	for i := range 5 {
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, state); err != nil {
+			t.Fatalf("sync %d: %v", i, err)
+		}
+	}
+
+	got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+		Name: "default", Path: "/home/user/project",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "waiting" {
+		t.Errorf("status = %q, want %q", got, "waiting")
+	}
+}
+
+func TestSyncGemini_WaitingDoesNotRevertWhenPromptNeverSeen(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	cacheDir := t.TempDir()
+	ft := &fakeTmux{
+		sessions:           map[string]bool{"muxac-default@home@user@project": true},
+		capturePaneOutputs: map[string]string{"muxac-default@home@user@project": "Some random output\n"},
+	}
+	queries := database.SetupTestDB(t)
+	homeDir := t.TempDir()
+
+	if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+		Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+		AgentTool: "gemini", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+		AgentSessionID: "abcdefgh-1234", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	state := newMonitorState()
+
+	// Prompt was never seen, so should not revert even after many syncs.
+	for i := range 5 {
+		if err := sync(ctx, ft, queries, homeDir, cacheDir, state); err != nil {
+			t.Fatalf("sync %d: %v", i, err)
+		}
+	}
+
+	got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+		Name: "default", Path: "/home/user/project",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "waiting" {
+		t.Errorf("status = %q, want %q (prompt was never seen, should not revert)", got, "waiting")
+	}
+}
+
 func TestSyncCodex(t *testing.T) {
 	t.Parallel()
 
@@ -2375,7 +2530,7 @@ func TestSyncCodex(t *testing.T) {
 		writeCodexLog(t, cacheDir, "\n")
 
 		state := newMonitorState()
-		for i := 0; i < 5; i++ {
+		for range 5 {
 			if err := sync(ctx, ft, queries, homeDir, cacheDir, state); err != nil {
 				t.Fatal(err)
 			}
@@ -2484,6 +2639,72 @@ func TestTerminalShowsCodexWaitingPrompt(t *testing.T) {
 			got := terminalShowsCodexWaitingPrompt(tt.output)
 			if got != tt.want {
 				t.Errorf("terminalShowsCodexWaitingPrompt() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTerminalShowsGeminiWaitingPrompt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			name:   "shell command confirmation",
+			output: "Action Required\n? Shell Command  echo hello\nAllow once\nAllow for this session\nNo, suggest changes (esc)\n",
+			want:   true,
+		},
+		{
+			name:   "edit confirmation with file scope",
+			output: "Action Required\n? Edit  main.go\nAllow once\nAllow for this file in all future sessions\nNo, suggest changes (esc)\n",
+			want:   true,
+		},
+		{
+			name:   "mcp tool confirmation",
+			output: "Action Required\nAllow tool for this session\nAllow all server tools for this session\nAllow tool for all future sessions\nNo, suggest changes (esc)\n",
+			want:   true,
+		},
+		{
+			name:   "allow for all future sessions",
+			output: "? Shell Command  rm -rf /\nAllow once\nAllow for all future sessions\nNo, suggest changes (esc)\n",
+			want:   true,
+		},
+		{
+			name:   "allow this command for all future sessions",
+			output: "? Shell Command  ls\nAllow once\nAllow this command for all future sessions\nNo, suggest changes (esc)\n",
+			want:   true,
+		},
+		{
+			name:   "action required header only",
+			output: "Action Required\nLoading...\n",
+			want:   true,
+		},
+		{
+			name:   "no prompt visible",
+			output: "Processing files...\nDone.\n",
+			want:   false,
+		},
+		{
+			name:   "empty output",
+			output: "",
+			want:   false,
+		},
+		{
+			name:   "non-breaking spaces normalized",
+			output: "Action\u00a0Required\n",
+			want:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := terminalShowsGeminiWaitingPrompt(tt.output)
+			if got != tt.want {
+				t.Errorf("terminalShowsGeminiWaitingPrompt() = %v, want %v", got, tt.want)
 			}
 		})
 	}

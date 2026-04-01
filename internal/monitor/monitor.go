@@ -182,7 +182,7 @@ func syncSession(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Quer
 	case agent.Claude:
 		return syncClaudeCodeSession(ctx, queries, homeDir, sess, tmuxRunner, tmuxName, state)
 	case agent.Gemini:
-		return syncGeminiSession(ctx, queries, homeDir, sess)
+		return syncGeminiSession(ctx, queries, homeDir, sess, tmuxRunner, tmuxName, state)
 	case agent.Unknown:
 		return nil
 	}
@@ -502,22 +502,73 @@ type geminiInfoMessage struct {
 	Content   string `json:"content"`
 }
 
-func syncGeminiSession(ctx context.Context, queries *sqlc.Queries, homeDir string, sess sqlc.ListSessionsRow) error {
-	if sess.AgentSessionID == "" {
+func syncGeminiSession(ctx context.Context, queries *sqlc.Queries, homeDir string, sess sqlc.ListSessionsRow, tmuxRunner tmux.Runner, tmuxName string, state *monitorState) error {
+	st := status.Status(sess.Status)
+	sessionKey := sess.Name + ":" + sess.Path
+
+	// File-based cancellation detection.
+	if sess.AgentSessionID != "" {
+		pattern := agent.GeminiSessionFilePattern(homeDir, sess.Path, sess.AgentSessionID)
+		if pattern != "" {
+			if cancelled, err := detectGeminiCancellation(ctx, queries, sess, pattern, st); err != nil {
+				return err
+			} else if cancelled {
+				delete(state.capturePaneClearCount, sessionKey)
+				delete(state.capturePromptSeen, sessionKey)
+				return nil
+			}
+		}
+	}
+
+	// Capture-pane based waiting→running detection.
+	if st != status.Waiting {
+		delete(state.capturePaneClearCount, sessionKey)
+		delete(state.capturePromptSeen, sessionKey)
 		return nil
 	}
 
-	pattern := agent.GeminiSessionFilePattern(homeDir, sess.Path, sess.AgentSessionID)
-	if pattern == "" {
+	output, err := tmuxRunner.CapturePane(ctx, tmuxName)
+	if err != nil {
+		return nil // non-fatal
+	}
+
+	if terminalShowsGeminiWaitingPrompt(output) {
+		state.capturePaneClearCount[sessionKey] = 0
+		state.capturePromptSeen[sessionKey] = true
 		return nil
 	}
 
+	if !state.capturePromptSeen[sessionKey] {
+		return nil
+	}
+
+	state.capturePaneClearCount[sessionKey]++
+	if state.capturePaneClearCount[sessionKey] < 2 {
+		return nil // debounce: need 2 consecutive clears
+	}
+
+	delete(state.capturePaneClearCount, sessionKey)
+	delete(state.capturePromptSeen, sessionKey)
+	return queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
+		Status:       string(status.Running),
+		UpdatedAt:    timestamp.Now(),
+		WaitingSince: "",
+		Name:         sess.Name,
+		Path:         sess.Path,
+		Status_2:     string(st),
+	})
+}
+
+// detectGeminiCancellation checks the Gemini session file for a "Request cancelled."
+// marker and transitions the session to idle if found. Returns true if a cancellation
+// was detected and handled.
+func detectGeminiCancellation(ctx context.Context, queries *sqlc.Queries, sess sqlc.ListSessionsRow, pattern string, st status.Status) (bool, error) {
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
-		return fmt.Errorf("glob gemini session %q: %w", pattern, err)
+		return false, fmt.Errorf("glob gemini session %q: %w", pattern, err)
 	}
 	if len(matches) == 0 {
-		return nil
+		return false, nil
 	}
 
 	// Pick the most recently modified file when multiple matches exist.
@@ -538,55 +589,96 @@ func syncGeminiSession(ctx context.Context, queries *sqlc.Queries, homeDir strin
 	tail, err := readTail(sessionFile, 4096)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("read gemini session tail %q: %w", sessionFile, err)
+		return false, fmt.Errorf("read gemini session tail %q: %w", sessionFile, err)
 	}
 
 	const marker = `"Request cancelled."`
 	chunk := string(tail)
 	idx := strings.LastIndex(chunk, marker)
 	if idx < 0 {
-		return nil
+		return false, nil
 	}
 
 	// Extract the enclosing JSON object {...} around the marker.
 	start := strings.LastIndex(chunk[:idx], "{")
 	if start < 0 {
-		return nil
+		return false, nil
 	}
 	end := strings.Index(chunk[idx:], "}")
 	if end < 0 {
-		return nil
+		return false, nil
 	}
 	objStr := chunk[start : idx+end+1]
 
 	var msg geminiInfoMessage
 	if err := json.Unmarshal([]byte(objStr), &msg); err != nil {
-		return nil
+		return false, nil
 	}
 
 	if msg.Timestamp == "" {
-		return nil
+		return false, nil
 	}
 
 	if !isAfter(msg.Timestamp, sess.UpdatedAt) {
-		return nil
+		return false, nil
 	}
 
-	st := status.Status(sess.Status)
 	if st != status.Running && st != status.Waiting {
-		return nil
+		return false, nil
 	}
 
-	return queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
+	if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
 		Status:       string(status.Idle),
 		UpdatedAt:    timestamp.Now(),
 		WaitingSince: "",
 		Name:         sess.Name,
 		Path:         sess.Path,
 		Status_2:     string(st),
-	})
+	}); err != nil {
+		return false, fmt.Errorf("update gemini status to idle: %w", err)
+	}
+	return true, nil
+}
+
+// terminalShowsGeminiWaitingPrompt checks if the captured terminal output contains
+// patterns indicating a Gemini CLI permission/approval prompt is visible.
+func terminalShowsGeminiWaitingPrompt(output string) bool {
+	output = strings.ReplaceAll(output, "\u00a0", " ")
+
+	allLines := strings.Split(output, "\n")
+	var nonEmpty []string
+	for _, l := range allLines {
+		trimmed := strings.TrimSpace(l)
+		if trimmed != "" {
+			nonEmpty = append(nonEmpty, trimmed)
+		}
+	}
+	if len(nonEmpty) > 15 {
+		nonEmpty = nonEmpty[len(nonEmpty)-15:]
+	}
+
+	lower := strings.ToLower(strings.Join(nonEmpty, "\n"))
+
+	patterns := []string{
+		"allow once",
+		"allow for this session",
+		"allow for all future sessions",
+		"allow for this file in all future sessions",
+		"allow this command for all future sessions",
+		"allow tool for this session",
+		"allow all server tools for this session",
+		"allow tool for all future sessions",
+		"no, suggest changes",
+		"action required",
+	}
+	for _, p := range patterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
 }
 
 type codexLogLine struct {

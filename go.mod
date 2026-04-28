@@ -2,7 +2,7 @@ module github.com/110y/muxac
 
 go 1.26.1
 
-require modernc.org/sqlite v1.49.1
+require modernc.org/sqlite v1.50.0
 
 tool (
 	github.com/aquaproj/aqua/v2/cmd/aqua

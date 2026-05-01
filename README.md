@@ -4,11 +4,12 @@
 
 ## Overview
 
-`muxac` provides three primitive features to manage sessions of Agentic Coding tools:
+`muxac` provides four primitive features to manage sessions of Agentic Coding tools:
 
 - `muxac new`: Creating a new session
 - `muxac list`: Listing all sessions with their status
 - `muxac attach`: Attaching to an existing session
+- `muxac remove`: Removing an existing session
 
 Using these primitives, you can also build your own tools like a dashboard or UI on top of `muxac`.
 
@@ -290,6 +291,19 @@ Attaches to an existing session.
 
 ```bash
 $ muxac attach [--name <name>] [--dir <path>]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--name <name>` | Session name (default: `default`) |
+| `--dir <path>` | Working directory (default: current directory) |
+
+### `muxac remove`
+
+Removes an existing session.
+
+```bash
+$ muxac remove [--name <name>] [--dir <path>]
 ```
 
 | Flag | Description |

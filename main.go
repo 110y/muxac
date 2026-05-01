@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/110y/muxac/internal/agent"
@@ -46,9 +47,15 @@ func run() error {
 
 	if os.Args[1] == "version" {
 		for _, arg := range os.Args[2:] {
-			if arg == "--help" || arg == "-h" {
+			switch arg {
+			case "--help", "-h":
 				usageVersion()
 				return nil
+			default:
+				if strings.HasPrefix(arg, "-") {
+					return fmt.Errorf("unknown option: %s", arg)
+				}
+				return fmt.Errorf("unexpected argument: %s", arg)
 			}
 		}
 		fmt.Fprintf(os.Stdout, "%s\n", version.Version)
@@ -116,9 +123,13 @@ func run() error {
 				tmuxConf = args[i+1]
 				i++
 			default:
-				if command == "" {
-					command = args[i]
+				if strings.HasPrefix(args[i], "-") {
+					return fmt.Errorf("unknown option: %s", args[i])
 				}
+				if command != "" {
+					return fmt.Errorf("unexpected argument: %s", args[i])
+				}
+				command = args[i]
 			}
 		}
 		if command == "" {
@@ -171,6 +182,11 @@ func run() error {
 				}
 				dir = args[i+1]
 				i++
+			default:
+				if strings.HasPrefix(args[i], "-") {
+					return fmt.Errorf("unknown option: %s", args[i])
+				}
+				return fmt.Errorf("unexpected argument: %s", args[i])
 			}
 		}
 		var workDir string
@@ -201,6 +217,11 @@ func run() error {
 				opts.NoHeader = true
 			case "--json":
 				opts.JSON = true
+			default:
+				if strings.HasPrefix(arg, "-") {
+					return fmt.Errorf("unknown option: %s", arg)
+				}
+				return fmt.Errorf("unexpected argument: %s", arg)
 			}
 		}
 		if err := monitor.EnsureRunning(ctx, tmuxRunner, queries); err != nil {
@@ -210,9 +231,15 @@ func run() error {
 
 	case "hook":
 		for _, arg := range os.Args[2:] {
-			if arg == "--help" || arg == "-h" {
+			switch arg {
+			case "--help", "-h":
 				usageHook()
 				return nil
+			default:
+				if strings.HasPrefix(arg, "-") {
+					return fmt.Errorf("unknown option: %s", arg)
+				}
+				return fmt.Errorf("unexpected argument: %s", arg)
 			}
 		}
 		sessionName := os.Getenv(agent.EnvSessionName)
@@ -233,9 +260,15 @@ func run() error {
 
 	case "monitor":
 		for _, arg := range os.Args[2:] {
-			if arg == "--help" || arg == "-h" {
+			switch arg {
+			case "--help", "-h":
 				usageMonitor()
 				return nil
+			default:
+				if strings.HasPrefix(arg, "-") {
+					return fmt.Errorf("unknown option: %s", arg)
+				}
+				return fmt.Errorf("unexpected argument: %s", arg)
 			}
 		}
 		logger := slog.New(dblog.NewHandler(queries, slog.LevelError))

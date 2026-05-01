@@ -20,6 +20,7 @@ import (
 	"github.com/110y/muxac/internal/list"
 	"github.com/110y/muxac/internal/monitor"
 	"github.com/110y/muxac/internal/newcmd"
+	"github.com/110y/muxac/internal/remove"
 	"github.com/110y/muxac/internal/tmux"
 	"github.com/110y/muxac/internal/version"
 )
@@ -206,6 +207,51 @@ func run() error {
 		}
 		return attach.Run(ctx, tmuxRunner, name, workDir)
 
+	case "remove":
+		name := "default"
+		var dir string
+		args := os.Args[2:]
+		for i := 0; i < len(args); i++ {
+			switch args[i] {
+			case "--help", "-h":
+				usageRemove()
+				return nil
+			case "--name":
+				if i+1 >= len(args) {
+					return fmt.Errorf("--name requires an argument")
+				}
+				name = args[i+1]
+				i++
+			case "--dir":
+				if i+1 >= len(args) {
+					return fmt.Errorf("--dir requires an argument")
+				}
+				dir = args[i+1]
+				i++
+			default:
+				if strings.HasPrefix(args[i], "-") {
+					return fmt.Errorf("unknown option: %s", args[i])
+				}
+				return fmt.Errorf("unexpected argument: %s", args[i])
+			}
+		}
+		var workDir string
+		if dir != "" {
+			workDir, err = filepath.Abs(dir)
+			if err != nil {
+				return err
+			}
+		} else {
+			workDir, err = os.Getwd()
+			if err != nil {
+				return err
+			}
+		}
+		if err := monitor.EnsureRunning(ctx, tmuxRunner, queries); err != nil {
+			return err
+		}
+		return remove.Run(ctx, tmuxRunner, queries, name, workDir)
+
 	case "list":
 		var opts list.Options
 		for _, arg := range os.Args[2:] {
@@ -286,6 +332,7 @@ func usage() {
 Commands:
   new [--name <name>] [--dir <path>] [--env KEY=VALUE ...] [--tmux-conf <path>] <command>  Create a new tmux session
   attach [--name <name>] [--dir <path>]                               Attach to an existing tmux session
+  remove [--name <name>] [--dir <path>]                               Remove an existing tmux session
   list [--no-header] [--json]                                          List all muxac sessions with their status
   hook                                                                Update status based on coding agent hook event (reads JSON from stdin)
   version                                                             Show version information`)
@@ -308,6 +355,17 @@ func usageAttach() {
 	fmt.Fprintln(os.Stderr, `Usage: muxac attach [options]
 
 Attach to an existing tmux session.
+
+Options:
+  --name <name>    Session name (default: "default")
+  --dir <path>     Working directory (default: current directory)
+  --help, -h       Show this help message`)
+}
+
+func usageRemove() {
+	fmt.Fprintln(os.Stderr, `Usage: muxac remove [options]
+
+Remove an existing tmux session and its tracking data.
 
 Options:
   --name <name>    Session name (default: "default")

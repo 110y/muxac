@@ -148,15 +148,41 @@ Add the following hook configuration to your Claude Code settings file (e.g. `~/
 <details>
 <summary>Codex</summary>
 
-No additional configuration is required. `muxac` automatically detects Codex sessions and monitors their status via TUI session logs.
+Add the following hook configuration to your Codex settings file (e.g. `~/.codex/config.toml`):
 
-Simply create a new session with the `codex` command like:
+```toml
+[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "muxac hook"
 
-```bash
-$ muxac new codex
+[[hooks.UserPromptSubmit]]
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "muxac hook"
+
+[[hooks.PreToolUse]]
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "muxac hook"
+
+[[hooks.PostToolUse]]
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "muxac hook"
+
+[[hooks.PermissionRequest]]
+[[hooks.PermissionRequest.hooks]]
+type = "command"
+command = "muxac hook"
+
+[[hooks.Stop]]
+[[hooks.Stop.hooks]]
+type = "command"
+command = "muxac hook"
 ```
 
-> **Note:** `muxac` automatically sets `CODEX_TUI_RECORD_SESSION` and `CODEX_TUI_SESSION_LOG_PATH` environment variables in the Codex session to monitor session status.
+> **Note:** Codex requires you to trust each command hook before it will run. Open Codex once and run the `/hooks` slash command to review and trust the new `muxac hook` entries. Until trusted, the hooks are skipped and status monitoring will not work.
 
 </details>
 

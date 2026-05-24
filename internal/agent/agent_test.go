@@ -55,36 +55,65 @@ func TestDetectTool(t *testing.T) {
 		name             string
 		geminiProjectDir string
 		claudeProjectDir string
+		hookInputCwd     string
 		want             agent.Tool
 	}{
 		{
-			name:             "Gemini detected via GEMINI_PROJECT_DIR",
+			name:             "Gemini detected via GEMINI_PROJECT_DIR (cwd empty)",
 			geminiProjectDir: "/home/user/project",
 			want:             agent.Gemini,
 		},
 		{
-			name:             "Gemini takes priority when both env vars set",
+			name:             "Gemini detected when GEMINI_PROJECT_DIR matches cwd",
+			geminiProjectDir: "/home/user/project",
+			hookInputCwd:     "/home/user/project",
+			want:             agent.Gemini,
+		},
+		{
+			name:             "Gemini ignored when GEMINI_PROJECT_DIR mismatches cwd",
+			geminiProjectDir: "/home/user/project",
+			hookInputCwd:     "/home/user/elsewhere",
+			want:             agent.Codex,
+		},
+		{
+			name:             "Gemini takes priority when both env vars set and match",
 			geminiProjectDir: "/home/user/project",
 			claudeProjectDir: "/home/user/project",
+			hookInputCwd:     "/home/user/project",
 			want:             agent.Gemini,
 		},
 		{
-			name:             "Claude detected via CLAUDE_PROJECT_DIR",
+			name:             "Claude detected via CLAUDE_PROJECT_DIR (cwd empty)",
 			claudeProjectDir: "/home/user/project",
 			want:             agent.Claude,
 		},
 		{
-			name:             "Unknown when both are empty",
-			geminiProjectDir: "",
-			claudeProjectDir: "",
-			want:             agent.Unknown,
+			name:             "Claude detected when CLAUDE_PROJECT_DIR matches cwd",
+			claudeProjectDir: "/home/user/project",
+			hookInputCwd:     "/home/user/project",
+			want:             agent.Claude,
+		},
+		{
+			name:             "Stale CLAUDE_PROJECT_DIR ignored, falls back to Codex via cwd",
+			claudeProjectDir: "/home/user/somewhere",
+			hookInputCwd:     "/home/user/elsewhere",
+			want:             agent.Codex,
+		},
+		{
+			name:         "Codex detected via hook input cwd alone",
+			hookInputCwd: "/home/user/project",
+			want:         agent.Codex,
+		},
+		{
+			name: "Unknown when everything is empty",
+			want: agent.Unknown,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := agent.DetectTool(tt.geminiProjectDir, tt.claudeProjectDir)
+			got := agent.DetectTool(tt.geminiProjectDir, tt.claudeProjectDir, tt.hookInputCwd)
 			if got != tt.want {
 				t.Errorf("DetectTool() = %v, want %v", got, tt.want)
 			}
@@ -100,25 +129,45 @@ func TestProjectDir(t *testing.T) {
 		tool             agent.Tool
 		geminiProjectDir string
 		claudeProjectDir string
+		hookInputCwd     string
 		want             string
 	}{
 		{
-			name:             "Gemini returns GEMINI_PROJECT_DIR",
+			name:             "Gemini returns hook input cwd",
 			tool:             agent.Gemini,
 			geminiProjectDir: "/home/user/gemini-project",
-			claudeProjectDir: "/home/user/project",
+			hookInputCwd:     "/home/user/gemini-project",
 			want:             "/home/user/gemini-project",
 		},
 		{
-			name:             "Claude returns CLAUDE_PROJECT_DIR",
+			name:             "Gemini falls back to GEMINI_PROJECT_DIR when cwd empty",
+			tool:             agent.Gemini,
+			geminiProjectDir: "/home/user/gemini-project",
+			want:             "/home/user/gemini-project",
+		},
+		{
+			name:             "Claude returns hook input cwd",
+			tool:             agent.Claude,
+			claudeProjectDir: "/home/user/project",
+			hookInputCwd:     "/home/user/project",
+			want:             "/home/user/project",
+		},
+		{
+			name:             "Claude falls back to CLAUDE_PROJECT_DIR when cwd empty",
 			tool:             agent.Claude,
 			claudeProjectDir: "/home/user/project",
 			want:             "/home/user/project",
 		},
 		{
-			name:             "Codex returns empty string",
+			name:         "Codex returns hook input cwd",
+			tool:         agent.Codex,
+			hookInputCwd: "/home/user/codex-project",
+			want:         "/home/user/codex-project",
+		},
+		{
+			name:             "Codex returns empty when cwd missing",
 			tool:             agent.Codex,
-			claudeProjectDir: "/home/user/project",
+			claudeProjectDir: "/home/user/leaked-from-parent",
 			want:             "",
 		},
 		{
@@ -132,7 +181,7 @@ func TestProjectDir(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := agent.ProjectDir(tt.tool, tt.geminiProjectDir, tt.claudeProjectDir)
+			got := agent.ProjectDir(tt.tool, tt.geminiProjectDir, tt.claudeProjectDir, tt.hookInputCwd)
 			if got != tt.want {
 				t.Errorf("ProjectDir() = %q, want %q", got, tt.want)
 			}
@@ -223,16 +272,6 @@ func TestJsonlPath(t *testing.T) {
 				t.Errorf("JsonlPath() = %q, want %q", got, tt.want)
 			}
 		})
-	}
-}
-
-func TestCodexSessionLogPath(t *testing.T) {
-	t.Parallel()
-
-	got := agent.CodexSessionLogPath("/home/user/.cache/muxac", "muxac-default@home@user@project")
-	want := filepath.Join("/home/user/.cache/muxac", "codex", "sessions", "muxac-default@home@user@project.jsonl")
-	if got != want {
-		t.Errorf("CodexSessionLogPath() = %q, want %q", got, want)
 	}
 }
 

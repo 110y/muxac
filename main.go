@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"embed"
+	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -160,7 +163,7 @@ func run() error {
 		if err := monitor.EnsureRunning(ctx, tmuxRunner, queries); err != nil {
 			return err
 		}
-		return newcmd.Run(ctx, tmuxRunner, queries, name, workDir, tmuxConf, command, cacheDir, env)
+		return newcmd.Run(ctx, tmuxRunner, queries, name, workDir, tmuxConf, command, env)
 
 	case "attach":
 		name := "default"
@@ -292,17 +295,30 @@ func run() error {
 		if sessionName == "" {
 			return nil
 		}
+		stdinBytes, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return err
+		}
+		var probe struct {
+			Cwd string `json:"cwd"`
+		}
+		if err := json.Unmarshal(stdinBytes, &probe); err != nil {
+			return err
+		}
 		geminiProjectDir := os.Getenv("GEMINI_PROJECT_DIR")
 		claudeProjectDir := os.Getenv("CLAUDE_PROJECT_DIR")
-		tool := agent.DetectTool(geminiProjectDir, claudeProjectDir)
+		tool := agent.DetectTool(geminiProjectDir, claudeProjectDir, probe.Cwd)
 		if tool == agent.Unknown {
 			return nil
 		}
-		projectDir := agent.ProjectDir(tool, geminiProjectDir, claudeProjectDir)
+		projectDir := agent.ProjectDir(tool, geminiProjectDir, claudeProjectDir, probe.Cwd)
+		if projectDir == "" {
+			return nil
+		}
 		if err := monitor.EnsureRunning(ctx, tmuxRunner, queries); err != nil {
 			return err
 		}
-		return hook.Run(ctx, os.Stdin, queries, sessionName, projectDir, tool)
+		return hook.Run(ctx, bytes.NewReader(stdinBytes), queries, sessionName, projectDir, tool)
 
 	case "monitor":
 		for _, arg := range os.Args[2:] {
@@ -318,7 +334,7 @@ func run() error {
 			}
 		}
 		logger := slog.New(dblog.NewHandler(queries, slog.LevelError))
-		return monitor.Run(ctx, tmuxRunner, queries, homeDir, cacheDir, logger)
+		return monitor.Run(ctx, tmuxRunner, queries, homeDir, logger)
 
 	default:
 		usage()
@@ -393,9 +409,10 @@ Reads a JSON hook event from stdin.
 Required environment variables:
   MUXAC_SESSION_NAME    The tmux session name
 
-Tool detection environment variables (at least one must be set):
-  GEMINI_PROJECT_DIR    Set by Gemini CLI hooks
-  CLAUDE_PROJECT_DIR    Set by Claude Code hooks
+Tool detection:
+  GEMINI_PROJECT_DIR    Set by Gemini CLI hooks (detects Gemini)
+  CLAUDE_PROJECT_DIR    Set by Claude Code hooks (detects Claude)
+  cwd field on stdin    Falls back to Codex when no env var matches
 
 Options:
   --help, -h    Show this help message`)

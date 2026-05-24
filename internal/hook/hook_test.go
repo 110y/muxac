@@ -178,6 +178,36 @@ func TestRun(t *testing.T) {
 			tool:        agent.Gemini,
 			wantNoop:    true,
 		},
+		{
+			name:        "Codex UserPromptSubmit writes running",
+			input:       `{"hook_event_name": "UserPromptSubmit", "cwd": "/home/user/project"}`,
+			sessionName: "default",
+			projectDir:  "/home/user/project",
+			tool:        agent.Codex,
+			wantName:    "default",
+			wantPath:    "/home/user/project",
+			wantStatus:  "running",
+		},
+		{
+			name:        "Codex PermissionRequest writes waiting",
+			input:       `{"hook_event_name": "PermissionRequest", "cwd": "/home/user/project"}`,
+			sessionName: "default",
+			projectDir:  "/home/user/project",
+			tool:        agent.Codex,
+			wantName:    "default",
+			wantPath:    "/home/user/project",
+			wantStatus:  "waiting",
+		},
+		{
+			name:        "Codex Stop writes idle",
+			input:       `{"hook_event_name": "Stop", "cwd": "/home/user/project"}`,
+			sessionName: "default",
+			projectDir:  "/home/user/project",
+			tool:        agent.Codex,
+			wantName:    "default",
+			wantPath:    "/home/user/project",
+			wantStatus:  "idle",
+		},
 	}
 
 	for _, tt := range tests {
@@ -422,6 +452,38 @@ func TestRunWithCurrentState_Gemini(t *testing.T) {
 				t.Errorf("status = %q, want %q", got, tt.wantStatus)
 			}
 		})
+	}
+}
+
+func TestRunSessionStart_SavesAgentTool_Codex(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	queries := database.SetupTestDB(t)
+
+	if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+		Name: "default", Path: "/project", Status: "running", UpdatedAt: timestamp.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	r := strings.NewReader(`{"hook_event_name": "SessionStart", "session_id": "codex-789", "cwd": "/project"}`)
+	if err := hook.Run(ctx, r, queries, "default", "/project", agent.Codex); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sessions, err := queries.ListSessions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].AgentTool != "codex" {
+		t.Errorf("agent_tool = %q, want %q", sessions[0].AgentTool, "codex")
+	}
+	if sessions[0].AgentSessionID != "codex-789" {
+		t.Errorf("agent_session_id = %q, want %q", sessions[0].AgentSessionID, "codex-789")
 	}
 }
 

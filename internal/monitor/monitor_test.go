@@ -919,6 +919,216 @@ func TestSync(t *testing.T) {
 		}
 	})
 
+	t.Run("running becomes idle on API error termination", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
+			`{"uuid":"uuid-1","timestamp":"2099-01-01T00:00:01.000Z"}`+"\n"+
+				`{"type":"assistant","uuid":"uuid-2","timestamp":"2099-01-01T00:00:02.000Z","message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: 529 Overloaded."}]},"isApiErrorMessage":true,"apiErrorStatus":529}`+"\n")
+
+		if err := sync(ctx, ft, queries, homeDir, newMonitorState()); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "idle" {
+			t.Errorf("got %q, want idle (API error termination should transition running to idle)", got)
+		}
+	})
+
+	t.Run("waiting becomes idle on API error termination", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
+			`{"type":"assistant","uuid":"uuid-1","timestamp":"2099-01-01T00:00:01.000Z","message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: 529 Overloaded."}]},"isApiErrorMessage":true,"apiErrorStatus":529}`+"\n")
+
+		if err := sync(ctx, ft, queries, homeDir, newMonitorState()); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "idle" {
+			t.Errorf("got %q, want idle (API error termination should transition waiting to idle)", got)
+		}
+	})
+
+	t.Run("API error with old timestamp is ignored", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
+			`{"type":"assistant","uuid":"uuid-1","timestamp":"2000-01-01T00:00:01.000Z","message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: 529 Overloaded."}]},"isApiErrorMessage":true,"apiErrorStatus":529}`+"\n")
+
+		if err := sync(ctx, ft, queries, homeDir, newMonitorState()); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "running" {
+			t.Errorf("got %q, want running (old API error should be ignored)", got)
+		}
+	})
+
+	t.Run("API error in middle of file is ignored", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// API error line followed by a normal assistant line (user resumed after the error).
+		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
+			`{"type":"assistant","uuid":"uuid-1","timestamp":"2099-01-01T00:00:01.000Z","message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: 529 Overloaded."}]},"isApiErrorMessage":true,"apiErrorStatus":529}`+"\n"+
+				`{"uuid":"uuid-2","timestamp":"2099-01-01T00:00:02.000Z"}`+"\n")
+
+		if err := sync(ctx, ft, queries, homeDir, newMonitorState()); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "running" {
+			t.Errorf("got %q, want running (API error in middle should be ignored)", got)
+		}
+	})
+
+	t.Run("non-terminal api_error system line does not trigger transition", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// Intermediate retry log (type=system, subtype=api_error) does not have
+		// isApiErrorMessage=true and must not trigger the transition — Claude is still retrying.
+		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
+			`{"type":"system","subtype":"api_error","level":"error","timestamp":"2099-01-01T00:00:01.000Z","uuid":"uuid-1","retryAttempt":1,"maxRetries":10}`+"\n")
+
+		if err := sync(ctx, ft, queries, homeDir, newMonitorState()); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "running" {
+			t.Errorf("got %q, want running (intermediate retry log should not transition)", got)
+		}
+	})
+
 	t.Run("unknown tool skips JSONL processing", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()

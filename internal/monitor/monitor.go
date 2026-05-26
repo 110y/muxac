@@ -86,10 +86,11 @@ type jsonlMessage struct {
 }
 
 type jsonlLine struct {
-	UUID      string       `json:"uuid"`
-	Timestamp string       `json:"timestamp"`
-	Type      string       `json:"type"`
-	Message   jsonlMessage `json:"message"`
+	UUID              string       `json:"uuid"`
+	Timestamp         string       `json:"timestamp"`
+	Type              string       `json:"type"`
+	Message           jsonlMessage `json:"message"`
+	IsApiErrorMessage bool         `json:"isApiErrorMessage"`
 }
 
 func isInterruptionLine(line jsonlLine) bool {
@@ -101,6 +102,13 @@ func isInterruptionLine(line jsonlLine) bool {
 	}
 	c := line.Message.Content[0]
 	return c.Type == "text" && strings.HasPrefix(c.Text, "[Request interrupted by user")
+}
+
+// isAPIErrorLine reports whether the line is the synthetic assistant message
+// Claude Code writes after API retries are exhausted (e.g. 529 Overloaded).
+// No Stop hook fires in this case, so monitoring must detect it via the JSONL.
+func isAPIErrorLine(line jsonlLine) bool {
+	return line.Type == "assistant" && line.IsApiErrorMessage
 }
 
 func sync(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, homeDir string, state *monitorState) error {
@@ -272,6 +280,26 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 						Status_2:     string(st),
 					}); err != nil {
 						return fmt.Errorf("update status to idle: %w", err)
+					}
+				}
+				return nil
+			}
+
+			// API error termination (e.g. 529 Overloaded after retry exhaustion):
+			// Claude Code does not fire a Stop hook in this case, so the session
+			// would otherwise remain stuck in `running`.
+			if isAPIErrorLine(lastLine) && isAfter(lastLine.Timestamp, sess.UpdatedAt) {
+				st := status.Status(sess.Status)
+				if st == status.Running || st == status.Waiting {
+					if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
+						Status:       string(status.Idle),
+						UpdatedAt:    timestamp.Now(),
+						WaitingSince: "",
+						Name:         sess.Name,
+						Path:         sess.Path,
+						Status_2:     string(st),
+					}); err != nil {
+						return fmt.Errorf("update status to idle on api error: %w", err)
 					}
 				}
 				return nil

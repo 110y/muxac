@@ -1,6 +1,7 @@
 package hook_test
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -9,7 +10,29 @@ import (
 	"github.com/110y/muxac/internal/database/sqlc"
 	"github.com/110y/muxac/internal/hook"
 	"github.com/110y/muxac/internal/timestamp"
+	"github.com/110y/muxac/internal/tmux"
 )
+
+// fakeTmux is a tmux.Runner whose HasSession result is configurable.
+type fakeTmux struct {
+	hasSession bool
+}
+
+var _ tmux.Runner = (*fakeTmux)(nil)
+
+func (f *fakeTmux) HasSession(_ context.Context, _ string) bool     { return f.hasSession }
+func (f *fakeTmux) AttachSession(_ context.Context, _ string) error { return nil }
+func (f *fakeTmux) NewSession(_ context.Context, _ string, _ []string, _, _ string) error {
+	return nil
+}
+func (f *fakeTmux) ListSessionNames(_ context.Context) ([]string, error)    { return nil, nil }
+func (f *fakeTmux) KillSession(_ context.Context, _ string) error           { return nil }
+func (f *fakeTmux) NewDetachedSession(_ context.Context, _, _ string) error { return nil }
+func (f *fakeTmux) CapturePane(_ context.Context, _ string) (string, error) { return "", nil }
+
+// aliveTmux returns a fakeTmux that reports every session as alive, matching the
+// normal case where a hook fires from within its own muxac-managed tmux session.
+func aliveTmux() *fakeTmux { return &fakeTmux{hasSession: true} }
 
 func TestRun(t *testing.T) {
 	t.Parallel()
@@ -217,7 +240,7 @@ func TestRun(t *testing.T) {
 			queries := database.SetupTestDB(t)
 			r := strings.NewReader(tt.input)
 
-			err := hook.Run(ctx, r, queries, tt.sessionName, tt.projectDir, tt.tool)
+			err := hook.Run(ctx, r, aliveTmux(), queries, tt.sessionName, tt.projectDir, tt.tool)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -250,6 +273,29 @@ func TestRun(t *testing.T) {
 				t.Errorf("status = %q, want %q", got, tt.wantStatus)
 			}
 		})
+	}
+}
+
+func TestRunNoMuxacTmuxSessionIsNoop(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	queries := database.SetupTestDB(t)
+
+	// A nested agent launched in a subdirectory inherits MUXAC_SESSION_NAME but has
+	// no muxac-managed tmux session for its cwd. Its hook events must not create a
+	// phantom session row.
+	r := strings.NewReader(`{"hook_event_name": "UserPromptSubmit"}`)
+	if err := hook.Run(ctx, r, &fakeTmux{hasSession: false}, queries, "claude", "/home/user/project/sub/dir", agent.Claude); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rows, err := queries.ListSessions(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error listing sessions: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("expected no sessions when no muxac tmux session exists, got %d", len(rows))
 	}
 }
 
@@ -367,7 +413,7 @@ func TestRunWithCurrentState(t *testing.T) {
 			}
 
 			r := strings.NewReader(tt.input)
-			if err := hook.Run(ctx, r, queries, "default", "/project", agent.Claude); err != nil {
+			if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Claude); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
@@ -438,7 +484,7 @@ func TestRunWithCurrentState_Gemini(t *testing.T) {
 			}
 
 			r := strings.NewReader(tt.input)
-			if err := hook.Run(ctx, r, queries, "default", "/project", agent.Gemini); err != nil {
+			if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Gemini); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
@@ -468,7 +514,7 @@ func TestRunSessionStart_SavesAgentTool_Codex(t *testing.T) {
 	}
 
 	r := strings.NewReader(`{"hook_event_name": "SessionStart", "session_id": "codex-789", "cwd": "/project"}`)
-	if err := hook.Run(ctx, r, queries, "default", "/project", agent.Codex); err != nil {
+	if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Codex); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -500,7 +546,7 @@ func TestRunSessionStart_SavesAgentTool_Gemini(t *testing.T) {
 	}
 
 	r := strings.NewReader(`{"hook_event_name": "SessionStart", "session_id": "gem-456"}`)
-	if err := hook.Run(ctx, r, queries, "default", "/project", agent.Gemini); err != nil {
+	if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Gemini); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -531,7 +577,7 @@ func TestRunSessionStart_SavesSessionID(t *testing.T) {
 
 	// SessionStart with session_id
 	r := strings.NewReader(`{"hook_event_name": "SessionStart", "session_id": "abc-123"}`)
-	if err := hook.Run(ctx, r, queries, "default", "/project", agent.Claude); err != nil {
+	if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Claude); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -563,7 +609,7 @@ func TestRunPermissionRequest_SetsWaitingSince(t *testing.T) {
 
 	before := timestamp.Now()
 	r := strings.NewReader(`{"hook_event_name": "PermissionRequest"}`)
-	if err := hook.Run(ctx, r, queries, "default", "/project", agent.Claude); err != nil {
+	if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Claude); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -596,7 +642,7 @@ func TestRunUserPromptSubmit_ClearsWaitingSince(t *testing.T) {
 	}
 
 	r := strings.NewReader(`{"hook_event_name": "UserPromptSubmit"}`)
-	if err := hook.Run(ctx, r, queries, "default", "/project", agent.Claude); err != nil {
+	if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Claude); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -627,7 +673,7 @@ func TestRunSessionStart_SavesAgentTool(t *testing.T) {
 
 	// SessionStart with Claude tool
 	r := strings.NewReader(`{"hook_event_name": "SessionStart", "session_id": "abc-123"}`)
-	if err := hook.Run(ctx, r, queries, "default", "/project", agent.Claude); err != nil {
+	if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Claude); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -664,7 +710,7 @@ func TestRunSessionStart_NoSessionID(t *testing.T) {
 
 	// SessionStart without session_id should not overwrite
 	r := strings.NewReader(`{"hook_event_name": "SessionStart"}`)
-	if err := hook.Run(ctx, r, queries, "default", "/project", agent.Claude); err != nil {
+	if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Claude); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 

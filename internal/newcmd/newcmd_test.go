@@ -85,8 +85,9 @@ func TestRun_NewSession(t *testing.T) {
 	if ns.Name != "muxac-default@home@user@project" {
 		t.Errorf("session name = %q, want %q", ns.Name, "muxac-default@home@user@project")
 	}
-	if ns.Command != "claude" {
-		t.Errorf("command = %q, want %q", ns.Command, "claude")
+	wantCommand := "env -u CLAUDE_CODE_SESSION_ID -u CLAUDECODE -u CLAUDE_PROJECT_DIR claude"
+	if ns.Command != wantCommand {
+		t.Errorf("command = %q, want %q", ns.Command, wantCommand)
 	}
 	wantEnv := []string{"MY_VAR=hello", "MUXAC_SESSION_NAME=default"}
 	if len(ns.Env) != len(wantEnv) {
@@ -221,5 +222,27 @@ func TestRun_CustomTmuxConf(t *testing.T) {
 
 	if tmux.newSessions[0].SourceFile != "/custom/tmux.conf" {
 		t.Errorf("sourceFile = %q, want %q", tmux.newSessions[0].SourceFile, "/custom/tmux.conf")
+	}
+}
+
+func TestRun_StripsInheritedAgentSessionEnv(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	tmux := newFakeTmux()
+	queries := database.SetupTestDB(t)
+
+	err := newcmd.Run(ctx, tmux, queries, "default", "/home/user/project", "", "claude", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(tmux.newSessions) != 1 {
+		t.Fatalf("expected 1 new session, got %d", len(tmux.newSessions))
+	}
+
+	want := "env -u CLAUDE_CODE_SESSION_ID -u CLAUDECODE -u CLAUDE_PROJECT_DIR claude"
+	if got := tmux.newSessions[0].Command; got != want {
+		t.Errorf("command = %q, want %q", got, want)
 	}
 }

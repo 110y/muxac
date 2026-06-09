@@ -9,8 +9,10 @@ import (
 
 	"github.com/110y/muxac/internal/agent"
 	"github.com/110y/muxac/internal/database/sqlc"
+	"github.com/110y/muxac/internal/pathkey"
 	"github.com/110y/muxac/internal/status"
 	"github.com/110y/muxac/internal/timestamp"
+	"github.com/110y/muxac/internal/tmux"
 )
 
 type hookInput struct {
@@ -21,7 +23,7 @@ type hookInput struct {
 
 // Run reads a hook event from r and upserts the corresponding session status in the database.
 // sessionName comes from the MUXAC_SESSION_NAME env var, projectDir from the detected tool's project dir.
-func Run(ctx context.Context, r io.Reader, queries *sqlc.Queries, sessionName, projectDir string, tool agent.Tool) error {
+func Run(ctx context.Context, r io.Reader, tmuxRunner tmux.Runner, queries *sqlc.Queries, sessionName, projectDir string, tool agent.Tool) error {
 	if sessionName == "" {
 		return nil
 	}
@@ -40,6 +42,15 @@ func Run(ctx context.Context, r io.Reader, queries *sqlc.Queries, sessionName, p
 
 	target, ok := status.FromEvent(event)
 	if !ok {
+		return nil
+	}
+
+	// Only record events for sessions muxac actually manages. MUXAC_SESSION_NAME
+	// is inherited by every child process of the tmux session, so a nested agent
+	// launched in a subdirectory (e.g. a sub-session started inside the pane)
+	// would otherwise create a phantom session row keyed on its own cwd, even
+	// though no muxac tmux session exists for that directory.
+	if !tmuxRunner.HasSession(ctx, pathkey.TmuxSessionName(sessionName, projectDir)) {
 		return nil
 	}
 

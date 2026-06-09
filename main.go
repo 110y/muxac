@@ -318,7 +318,7 @@ func run() error {
 		if err := monitor.EnsureRunning(ctx, tmuxRunner, queries); err != nil {
 			return err
 		}
-		return hook.Run(ctx, bytes.NewReader(stdinBytes), queries, sessionName, projectDir, tool)
+		return hook.Run(ctx, bytes.NewReader(stdinBytes), tmuxRunner, queries, sessionName, projectDir, tool)
 
 	case "monitor":
 		for _, arg := range os.Args[2:] {

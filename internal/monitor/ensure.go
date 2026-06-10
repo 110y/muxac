@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"time"
 
@@ -12,6 +13,32 @@ import (
 )
 
 const monitorSessionName = "muxac-monitor"
+
+// monitorBuildID identifies the running monitor binary. It is computed once when
+// the process starts, combining the embedded version with the executable's size
+// and modification time.
+//
+// The size+mtime are essential for local development: the embedded version is a
+// git commit, which does not change between rebuilds of uncommitted work, so a
+// version-only check would leave a stale monitor running the old code (and the
+// fix under test would appear to have no effect). Comparing the build ID instead
+// makes EnsureRunning restart the monitor whenever the binary on disk differs
+// from the one the running monitor was started from. The path is deliberately
+// excluded so the same binary reached via different symlinks is not treated as a
+// change (which would otherwise cause restart thrashing).
+var monitorBuildID = computeBuildID()
+
+func computeBuildID() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return version.Version
+	}
+	info, err := os.Stat(exe)
+	if err != nil {
+		return version.Version
+	}
+	return fmt.Sprintf("%s|%d|%d", version.Version, info.Size(), info.ModTime().UnixNano())
+}
 
 // EnsureRunning ensures the monitor is running in a dedicated tmux session.
 // If the monitor session exists with a fresh heartbeat, it returns immediately.
@@ -49,5 +76,5 @@ func isMonitorAliveAndCurrent(ctx context.Context, queries *sqlc.Queries) bool {
 		return false
 	}
 
-	return row.Version == version.Version
+	return row.Version == monitorBuildID
 }

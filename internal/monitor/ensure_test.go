@@ -7,7 +7,6 @@ import (
 	"github.com/110y/muxac/internal/database"
 	"github.com/110y/muxac/internal/database/sqlc"
 	"github.com/110y/muxac/internal/timestamp"
-	"github.com/110y/muxac/internal/version"
 )
 
 func TestEnsureRunning_NoSessionNoHeartbeat(t *testing.T) {
@@ -41,9 +40,9 @@ func TestEnsureRunning_SessionExistsFreshHeartbeat(t *testing.T) {
 	ft.sessions[monitorSessionName] = true
 	queries := database.SetupTestDB(t)
 
-	// Write a fresh heartbeat with matching version.
+	// Write a fresh heartbeat with the current build ID.
 	if err := queries.UpsertMonitorHeartbeat(ctx, sqlc.UpsertMonitorHeartbeatParams{
-		Version:   version.Version,
+		Version:   monitorBuildID,
 		UpdatedAt: timestamp.Now(),
 	}); err != nil {
 		t.Fatal(err)
@@ -106,7 +105,7 @@ func TestEnsureRunning_SessionExistsStaleHeartbeat(t *testing.T) {
 	staleTS := time.Now().Add(-20 * time.Second).UTC().Format(timestamp.Format)
 	_, err := conn.ExecContext(ctx,
 		"INSERT INTO monitor_heartbeat (id, version, updated_at) VALUES (1, ?, ?)",
-		version.Version, staleTS)
+		monitorBuildID, staleTS)
 	if err != nil {
 		t.Fatal(err)
 	}

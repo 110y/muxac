@@ -77,8 +77,10 @@ func (f *fakeTmux) CapturePane(_ context.Context, sessionName string) (string, e
 
 func newMonitorState() *monitorState {
 	return &monitorState{
-		capturePaneClearCount: make(map[string]int),
-		capturePromptSeen:     make(map[string]bool),
+		capturePaneClearCount:      make(map[string]int),
+		capturePromptSeen:          make(map[string]bool),
+		captureRunningClearCount:   make(map[string]int),
+		captureRunningWaitingCount: make(map[string]int),
 	}
 }
 
@@ -679,6 +681,744 @@ func TestSync(t *testing.T) {
 		}
 	})
 
+	t.Run("running becomes idle on interruption followed by last-prompt marker", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// Claude Code appends a "last-prompt" marker line after the interruption
+		// when the user stops the agent and does not submit a new prompt.
+		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
+			`{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]},"uuid":"intr-1","timestamp":"2099-01-01T00:00:02.000Z"}`+"\n"+
+				`{"type":"last-prompt","leafUuid":"intr-1","sessionId":"sess-123"}`+"\n")
+
+		if err := sync(ctx, ft, queries, homeDir, newMonitorState()); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "idle" {
+			t.Errorf("got %q, want idle", got)
+		}
+	})
+
+	t.Run("running becomes idle on interruption followed by file-history-snapshot", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// Claude Code appends a "file-history-snapshot" marker line after an
+		// interruption during tool use.
+		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
+			`{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]},"uuid":"intr-1","timestamp":"2099-01-01T00:00:02.000Z"}`+"\n"+
+				`{"type":"file-history-snapshot","messageId":"snap-1","snapshot":{"messageId":"snap-1","trackedFileBackups":{},"timestamp":"2099-01-01T00:00:03.000Z"},"isSnapshotUpdate":false}`+"\n")
+
+		if err := sync(ctx, ft, queries, homeDir, newMonitorState()); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "idle" {
+			t.Errorf("got %q, want idle", got)
+		}
+	})
+
+	t.Run("running becomes idle when escaped before any output (no interruption line)", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		// Idle terminal: input box plus the user's custom status line. The status
+		// line reports context as a percentage and a clock "(3h 57m)", which must
+		// NOT be mistaken for the agent's "(12s · ↓ N tokens)" processing readout.
+		idlePane := "╭────────────────────────────────────────╮\n" +
+			"│ > do the thing                         │\n" +
+			"╰────────────────────────────────────────╯\n" +
+			"  21% | 5h: 6% (3h 57m) | 7d: 36% (Mon 23:00)        max"
+		ft := &fakeTmux{
+			sessions:           map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{"muxac-default@home@user@project": idlePane},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// Escaped immediately after submitting: the JSONL ends with the user's
+		// prompt (string content) and bookkeeping markers — no assistant response
+		// and no "[Request interrupted by user]" line.
+		// The prompt has string content (not an array of turns), so it is not a
+		// conversation line; with the markers it leaves no recent conversation
+		// write, so the terminal alone decides the session is idle.
+		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
+			`{"type":"user","message":{"role":"user","content":"do the thing"},"uuid":"p1","timestamp":"2099-01-01T00:00:01.000Z"}`+"\n"+
+				`{"type":"last-prompt","lastPrompt":"do the thing","leafUuid":"p1","sessionId":"sess-123"}`+"\n"+
+				`{"type":"mode","mode":"normal","sessionId":"sess-123"}`+"\n")
+
+		state := newMonitorState()
+
+		// The flip requires a sustained idle window (captureRunningIdleThreshold
+		// consecutive observations) so that brief no-spinner gaps mid-turn do not
+		// flicker a running session to idle; every tick before the threshold stays
+		// running.
+		for i := 1; i < captureRunningIdleThreshold; i++ {
+			if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+				t.Fatal(err)
+			}
+			got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != "running" {
+				t.Fatalf("after sync %d: got %q, want running (debounce)", i, got)
+			}
+		}
+
+		// The final consecutive idle observation crosses the threshold.
+		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+			t.Fatal(err)
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "idle" {
+			t.Errorf("got %q, want idle after %d idle observations", got, captureRunningIdleThreshold)
+		}
+	})
+
+	t.Run("running does not flicker to idle on a brief no-spinner gap with an unreadable transcript", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		// The agent is mid-turn but momentarily shows no spinner (a completed tool
+		// result just before its next message). Its transcript holds no usable
+		// conversation turn — e.g. a freshly restarted session whose file contains
+		// only an "ai-title" line — so conversationRecentlyWritten cannot keep it
+		// running. A brief gap like this must NOT flip the session to idle; only a
+		// sustained idle window may. Without the debounce this flickered to idle
+		// after two ticks and back to running on the next hook event.
+		idleLookingPane := "● The test finished. Let me read the results.\n" +
+			"● All four phases pass:\n" +
+			"────────────────────────\n" +
+			"❯ \n" +
+			"────────────────────────\n" +
+			"  9% | 5h: 27% (1h 37m)        Remote Control active"
+		ft := &fakeTmux{
+			sessions:           map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{"muxac-default@home@user@project": idleLookingPane},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// Transcript holds only a bookkeeping "ai-title" line — no conversation
+		// turn — so conversationRecentlyWritten is false throughout.
+		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
+			`{"type":"ai-title","aiTitle":"Configure nvim leader slash window","sessionId":"sess-123"}`+"\n")
+
+		state := newMonitorState()
+		// Across a brief gap (fewer ticks than the threshold) it must stay running.
+		for range captureRunningIdleThreshold - 1 {
+			if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "running" {
+			t.Errorf("got %q, want running (a brief no-spinner gap must not flicker to idle)", got)
+		}
+	})
+
+	t.Run("running does not flap to idle while transcript is being written", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		// Terminal looks idle to the heuristic — e.g. the spinner is scrolled out
+		// of view by a multi-line draft in the input box — yet the agent is busy.
+		idleLookingPane := "❯ a long draft the user is typing\n" +
+			"  second line of the draft\n" +
+			"  third line of the draft\n" +
+			"────\n" +
+			"  41% | 5h: 16% (0h 37m) | 7d: 38% (Mon 23:00)"
+		ft := &fakeTmux{
+			sessions:           map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{"muxac-default@home@user@project": idleLookingPane},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// Transcript was just written (agent actively producing output): a real
+		// assistant turn with a current timestamp.
+		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
+			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"}]},"uuid":"a1","timestamp":"`+timestamp.Now()+`"}`+"\n")
+
+		state := newMonitorState()
+		for range 4 {
+			if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "running" {
+			t.Errorf("got %q, want running (fresh transcript must keep session busy)", got)
+		}
+	})
+
+	t.Run("running stays running while terminal shows processing", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		busyPane := "● Let me investigate this.\n\n" +
+			"✢ Running… (12s · ↓ 3.4k tokens)\n" +
+			"────────────────────────────────\n" +
+			"❯ \n" +
+			"────────────────────────────────\n" +
+			"  21% | 5h: 6% (3h 57m)        max"
+		ft := &fakeTmux{
+			sessions:           map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{"muxac-default@home@user@project": busyPane},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		state := newMonitorState()
+		// Even after several ticks, an actively-processing session is never reverted.
+		for range 4 {
+			if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "running" {
+			t.Errorf("got %q, want running (agent still processing)", got)
+		}
+	})
+
+	t.Run("running with empty capture-pane stays running", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		// Empty output (transient render) must be treated as busy, not idle.
+		ft := &fakeTmux{
+			sessions:           map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{"muxac-default@home@user@project": ""},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		state := newMonitorState()
+		for range 3 {
+			if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "running" {
+			t.Errorf("got %q, want running (empty pane treated as busy)", got)
+		}
+	})
+
+	t.Run("running stays running when a draft hides the status line but esc to interrupt is visible", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		// The agent is busy (status line shows "esc to interrupt"), but the user
+		// is drafting a multi-line next message, which pushes the status line
+		// above the tail window the heuristic inspects. The session must NOT be
+		// reverted to idle: "esc to interrupt" is a definitive busy signal and is
+		// detected across the whole pane.
+		busyDraftPane := "✢ Running… (1m 4s · esc to interrupt)\n" +
+			"╭──────────────────────────────╮\n" +
+			"│ > draft line 1                │\n" +
+			"│ draft line 2                  │\n" +
+			"│ draft line 3                  │\n" +
+			"│ draft line 4                  │\n" +
+			"│ draft line 5                  │\n" +
+			"│ draft line 6                  │\n" +
+			"╰──────────────────────────────╯\n" +
+			"  21% | 5h: 6% (3h 57m)        max"
+		ft := &fakeTmux{
+			sessions:           map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{"muxac-default@home@user@project": busyDraftPane},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// A long-running step (e.g. a slow model response or tool call) left no
+		// recent conversation write: the only transcript entries are the user's
+		// submitted prompt (string content, which does not parse as a turn) and
+		// bookkeeping markers. So the terminal alone decides whether it is busy.
+		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
+			`{"type":"user","message":{"role":"user","content":"do the thing"},"uuid":"p1","timestamp":"2099-01-01T00:00:01.000Z"}`+"\n"+
+				`{"type":"last-prompt","lastPrompt":"do the thing","leafUuid":"p1","sessionId":"sess-123"}`+"\n"+
+				`{"type":"mode","mode":"normal","sessionId":"sess-123"}`+"\n")
+
+		state := newMonitorState()
+		for range 4 {
+			if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "running" {
+			t.Errorf("got %q, want running (busy session must not flap to idle when the status line is hidden)", got)
+		}
+	})
+
+	t.Run("running stays running when a draft hides the status line (token readout, no esc-to-interrupt)", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		// Same as above, but for Claude versions whose status line shows the
+		// "↓ N tokens" readout and no "esc to interrupt" hint. After approving a
+		// request the agent works on a long step while the user drafts the next
+		// message; the draft scrolls "Running… (… · ↓ N tokens)" above the tail
+		// window. The token readout is matched across the whole pane, so the
+		// session must stay running instead of momentarily flapping to idle.
+		busyDraftPane := "● analysing the change\n" +
+			"  ⎿  Listing 1 directory…\n" +
+			"✢ Running… (6m 48s · ↓ 29.8k tokens)\n" +
+			"────────────────────────────────────────\n" +
+			"❯ also update the docs\n" +
+			"  and add a test for\n" +
+			"  the new behaviour\n" +
+			"  then run the linter\n" +
+			"  and push the branch\n" +
+			"────────────────────────────────────────\n" +
+			"  25% | 5h: 8% (4h 24m) | 7d: 6% (Mon 23:00)        Remote Control active"
+		ft := &fakeTmux{
+			sessions:           map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{"muxac-default@home@user@project": busyDraftPane},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// No recent conversation write: only the submitted prompt (string content,
+		// not a parseable turn) and bookkeeping markers, so the terminal alone
+		// decides whether the session is busy.
+		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
+			`{"type":"user","message":{"role":"user","content":"do the thing"},"uuid":"p1","timestamp":"2099-01-01T00:00:01.000Z"}`+"\n"+
+				`{"type":"last-prompt","lastPrompt":"do the thing","leafUuid":"p1","sessionId":"sess-123"}`+"\n")
+
+		state := newMonitorState()
+		for range 4 {
+			if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "running" {
+			t.Errorf("got %q, want running (token readout must keep a drafting session busy)", got)
+		}
+	})
+
+	t.Run("running becomes waiting when a permission prompt appears", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		// The agent emitted a tool call that needs approval; the permission prompt
+		// is on screen, but no hook moved the session to waiting, so muxac still
+		// shows running. The monitor must detect the prompt and transition to
+		// waiting — even though the tool-call assistant turn was just written
+		// (conversationRecentlyWritten), which would otherwise keep it "running".
+		promptPane := "● Bash(echo hi)\n" +
+			"  ⎿  Waiting…\n" +
+			"────────────────────────────────────────\n" +
+			" Bash command\n" +
+			"   echo hi\n" +
+			" Do you want to proceed?\n" +
+			" ❯ 1. Yes\n" +
+			"   2. No\n" +
+			" Esc to cancel · Tab to amend · ctrl+e to explain"
+		ft := &fakeTmux{
+			sessions:           map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{"muxac-default@home@user@project": promptPane},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// A fresh assistant turn (the tool call), so conversationRecentlyWritten is
+		// true — the prompt detection must still take priority over it.
+		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
+			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"running it"}]},"uuid":"a1","timestamp":"`+timestamp.Now()+`"}`+"\n")
+
+		state := newMonitorState()
+
+		// First sync only arms the debounce; status stays running.
+		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+			t.Fatal(err)
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "running" {
+			t.Fatalf("after first sync: got %q, want running (debounce)", got)
+		}
+
+		// Second consecutive observation transitions to waiting.
+		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+			t.Fatal(err)
+		}
+		got, err = queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "waiting" {
+			t.Errorf("after second sync: got %q, want waiting", got)
+		}
+
+		// waiting_since must be set so the JSONL waiting→running heuristic works.
+		sessions, err := queries.ListSessions(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(sessions) != 1 || sessions[0].WaitingSince == "" {
+			t.Errorf("waiting_since not set on running→waiting transition")
+		}
+	})
+
+	t.Run("running stays running when no permission prompt is visible", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		// Guard against the running→waiting check firing without a real prompt: an
+		// ordinary busy terminal must keep the session running across many ticks.
+		busyPane := "● working on it\n✢ Running… (12s · ↓ 3.4k tokens)\n────\n❯ \n────\n  21% | 5h: 6% (3h 57m)"
+		ft := &fakeTmux{
+			sessions:           map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{"muxac-default@home@user@project": busyPane},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		state := newMonitorState()
+		for range 4 {
+			if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "running" {
+			t.Errorf("got %q, want running (no prompt visible)", got)
+		}
+	})
+
+	t.Run("idle becomes waiting directly when a permission prompt appears", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		// A permission prompt appeared on a session the hooks left marked idle (a
+		// missed/unmapped permission notification). It must be surfaced as waiting
+		// directly, not left idle (nor bounced through running).
+		promptPane := "● Bash(echo hi)\n" +
+			"  ⎿  Waiting…\n" +
+			"────────────────────────────────────────\n" +
+			" Bash command\n" +
+			"   echo hi\n" +
+			" Do you want to proceed?\n" +
+			" ❯ 1. Yes\n" +
+			"   2. No\n" +
+			" Esc to cancel · Tab to amend · ctrl+e to explain"
+		ft := &fakeTmux{
+			sessions:           map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{"muxac-default@home@user@project": promptPane},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "idle", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		state := newMonitorState()
+
+		// First sync arms the debounce; the session must never be seen as running.
+		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+			t.Fatal(err)
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "idle" {
+			t.Fatalf("after first sync: got %q, want idle (debounce, never running)", got)
+		}
+
+		// Second consecutive observation transitions to waiting.
+		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+			t.Fatal(err)
+		}
+		got, err = queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "waiting" {
+			t.Errorf("after second sync: got %q, want waiting", got)
+		}
+	})
+
+	t.Run("idle stays idle when the last message merely offers options", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		// A finished turn whose closing message offers choices ("Would you like
+		// me to…?") is NOT a permission prompt — it has no prompt chrome (no option
+		// list, no "esc to cancel" footer). It must stay idle, not be mistaken for
+		// a session blocked on a prompt.
+		offerPane := "● Done. I fixed the failing test and the lint passes.\n" +
+			"● Would you like me to proceed with the refactor, or do you want to review first?\n" +
+			"────────────────────────────────────────\n" +
+			"❯ \n" +
+			"────────────────────────────────────────\n" +
+			"  9% | 5h: 27% (1h 37m)        Remote Control active"
+		ft := &fakeTmux{
+			sessions:           map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{"muxac-default@home@user@project": offerPane},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "idle", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		state := newMonitorState()
+		for range 4 {
+			if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "idle" {
+			t.Errorf("got %q, want idle (an offer of options is not a permission prompt)", got)
+		}
+	})
+
 	t.Run("waiting becomes idle on interruption", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
@@ -851,10 +1591,12 @@ func TestSync(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Interruption line followed by a normal line
+		// Interruption line followed by a later conversation turn (a new user
+		// prompt): the interruption is no longer the latest conversation line, so
+		// it must be ignored even though its timestamp is after updated_at.
 		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
 			`{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user at 2099-01-01]"}]},"timestamp":"2099-01-01T00:00:01.000Z"}`+"\n"+
-				`{"uuid":"uuid-1","timestamp":"2099-01-01T00:00:02.000Z"}`+"\n")
+				`{"type":"user","message":{"content":[{"type":"text","text":"please continue"}]},"timestamp":"2099-01-01T00:00:02.000Z"}`+"\n")
 
 		if err := sync(ctx, ft, queries, homeDir, newMonitorState()); err != nil {
 			t.Fatal(err)
@@ -958,6 +1700,49 @@ func TestSync(t *testing.T) {
 		}
 		if got != "idle" {
 			t.Errorf("got %q, want idle (API error termination should transition running to idle)", got)
+		}
+	})
+
+	t.Run("running becomes idle on API error followed by bookkeeping marker", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// A bookkeeping marker appended after the API error line must not mask it.
+		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
+			`{"type":"assistant","uuid":"uuid-1","timestamp":"2099-01-01T00:00:02.000Z","message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: 529 Overloaded."}]},"isApiErrorMessage":true,"apiErrorStatus":529}`+"\n"+
+				`{"type":"file-history-snapshot","messageId":"snap-1","snapshot":{"messageId":"snap-1","trackedFileBackups":{},"timestamp":"2099-01-01T00:00:03.000Z"},"isSnapshotUpdate":false}`+"\n")
+
+		if err := sync(ctx, ft, queries, homeDir, newMonitorState()); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "idle" {
+			t.Errorf("got %q, want idle (API error must be detected despite trailing marker)", got)
 		}
 	})
 
@@ -1066,10 +1851,10 @@ func TestSync(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// API error line followed by a normal assistant line (user resumed after the error).
+		// API error line followed by a normal assistant line (the agent resumed after the error).
 		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
 			`{"type":"assistant","uuid":"uuid-1","timestamp":"2099-01-01T00:00:01.000Z","message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: 529 Overloaded."}]},"isApiErrorMessage":true,"apiErrorStatus":529}`+"\n"+
-				`{"uuid":"uuid-2","timestamp":"2099-01-01T00:00:02.000Z"}`+"\n")
+				`{"type":"assistant","uuid":"uuid-2","timestamp":"2099-01-01T00:00:02.000Z","message":{"model":"claude","content":[{"type":"text","text":"resumed"}]}}`+"\n")
 
 		if err := sync(ctx, ft, queries, homeDir, newMonitorState()); err != nil {
 			t.Fatal(err)
@@ -1201,10 +1986,12 @@ func TestSync(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Prompt disappears (user accepted)
-		ft.capturePaneOutputs["muxac-default@home@user@project"] = "Some output\nProcessing files...\n"
+		// Prompt disappears and the agent resumes (user accepted): the terminal
+		// now shows the live processing status line. Activity is positive evidence
+		// of resumption, so the transition to running happens immediately, without
+		// waiting out the idle debounce.
+		ft.capturePaneOutputs["muxac-default@home@user@project"] = "Some output\n✢ Running… (3s · ↓ 1.2k tokens)\n"
 
-		// Second sync: prompt gone, counter=1 (debounce)
 		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
 			t.Fatal(err)
 		}
@@ -1214,22 +2001,152 @@ func TestSync(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != "waiting" {
-			t.Fatalf("after second sync: got %q, want waiting (debounce)", got)
+		if got != "running" {
+			t.Errorf("after prompt dismissed with activity: got %q, want running", got)
+		}
+	})
+
+	t.Run("waiting becomes idle directly when prompt is dismissed without activity", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		// While waiting at a permission prompt the user presses Escape. Claude
+		// Code fires no usable Stop hook (Waiting+Stop is an invalid transition),
+		// and any "[Request interrupted by user for tool use]" line can lag behind
+		// the terminal clearing. The terminal is the only timely signal: the prompt
+		// is gone and the agent shows no activity, so the session must go straight
+		// to idle — it must never bounce through running (waiting → running → idle).
+		promptPane := "Some output\n" +
+			"  Do you want to proceed?\n" +
+			"  Yes, allow once\n" +
+			"  Yes, allow always\n" +
+			"  No, and tell Claude what to do differently\n"
+		idlePane := "╭────────────────────────────────────────╮\n" +
+			"│ >                                       │\n" +
+			"╰────────────────────────────────────────╯\n" +
+			"  21% | 5h: 6% (3h 57m) | 7d: 36% (Mon 23:00)        max"
+		ft := &fakeTmux{
+			sessions:           map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{"muxac-default@home@user@project": promptPane},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
 		}
 
-		// Third sync: prompt still gone, counter=2 → transitions
+		// No JSONL interruption line — the monitor must rely on capture-pane alone.
+		state := newMonitorState()
+
+		// First sync: prompt visible, capturePromptSeen is set; stays waiting.
 		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
 			t.Fatal(err)
 		}
-		got, err = queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
-			Name: "default", Path: "/home/user/project",
-		})
+
+		// User presses Escape: the prompt disappears, leaving an idle composer.
+		ft.capturePaneOutputs["muxac-default@home@user@project"] = idlePane
+
+		// Across the debounce window the session must never be observed running.
+		for i := range 3 {
+			if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+				t.Fatal(err)
+			}
+			got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got == "running" {
+				t.Fatalf("after escape sync %d: got running, want waiting then idle (must not bounce through running)", i+1)
+			}
+		}
+
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "idle" {
+			t.Errorf("got %q, want idle", got)
+		}
+	})
+
+	t.Run("waiting becomes running on approval even when the terminal briefly shows no activity", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		// After approving, a quick tool finishes and the agent is briefly between
+		// renders (e.g. model-invocation latency): the terminal shows no "Running…"
+		// line yet. The freshly written tool_result is positive evidence the agent
+		// resumed, so the session must go to running — never momentarily idle.
+		promptPane := "  Do you want to proceed?\n  Yes, allow once\n  Yes, allow always\n"
+		quietPane := "╭───────────────╮\n│ >             │\n╰───────────────╯\n  21% | 5h: 6% (3h 57m)        max"
+		ft := &fakeTmux{
+			sessions:           map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{"muxac-default@home@user@project": promptPane},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		state := newMonitorState()
+
+		// First sync: the permission prompt is visible; capturePromptSeen is set.
+		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+			t.Fatal(err)
+		}
+
+		// User approves: the prompt closes and a fresh tool_result lands in the
+		// transcript, but the terminal has not re-rendered the processing line yet.
+		// (Its timestamp stays within the waiting_since + 2s buffer so the JSONL
+		// running heuristic does not fire — the capture-pane path must decide.)
+		writeJSONL(t, homeDir, "-home-user-project", "sess-123",
+			`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"done"}]},"uuid":"tr1","timestamp":"`+timestamp.Now()+`"}`+"\n")
+		ft.capturePaneOutputs["muxac-default@home@user@project"] = quietPane
+
+		// Across several ticks the session must reach running and never be idled.
+		for i := range 3 {
+			if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+				t.Fatal(err)
+			}
+			got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got == "idle" {
+				t.Fatalf("after approval sync %d: got idle, want running (fresh tool_result means the agent resumed)", i+1)
+			}
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got != "running" {
-			t.Errorf("after second sync: got %q, want running", got)
+			t.Errorf("got %q, want running", got)
 		}
 	})
 
@@ -1611,6 +2528,41 @@ func TestTerminalShowsWaitingPrompt(t *testing.T) {
 			got := terminalShowsWaitingPrompt(tt.output)
 			if got != tt.want {
 				t.Errorf("terminalShowsWaitingPrompt() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTerminalShowsPermissionPrompt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		// Real prompts — matched via their chrome (footer / option list).
+		{"bash prompt footer", "Do you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel · Tab to amend · ctrl+e to explain", true},
+		{"question prompt footer", "  Which approach?\n❯ 1. A\n  2. B\nEnter to select · ↑/↓ to navigate · Esc to cancel", true},
+		{"allow once option", "  Yes, allow once\n  Yes, allow always\n", true},
+		{"no and tell claude option", "  No, and tell Claude what to do differently\n", true},
+		{"folder trust", "Do you trust the files in this folder?\n", true},
+		{"arrow keys footer", "Use arrow keys to navigate\n", true},
+		{"case insensitive", "ESC TO CANCEL\n", true},
+		{"nbsp normalization", "Esc to cancel\n", true},
+		// Not prompts — must NOT match, unlike the looser terminalShowsWaitingPrompt.
+		{"offer of options in prose", "● Would you like me to proceed, or do you want to review first?\n❯ \n", false},
+		{"do-you-want in prose", "I'm not sure what you want here. Do you want me to continue?\n❯ \n", false},
+		{"esc to interrupt is the busy hint, not a prompt", "✻ Running… (12s · esc to interrupt)\n❯ \n", false},
+		{"empty output", "", false},
+		{"ordinary output", "Processing files...\nReading data...\n", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := terminalShowsPermissionPrompt(tt.output); got != tt.want {
+				t.Errorf("terminalShowsPermissionPrompt() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -2123,6 +3075,129 @@ func TestCodexShowsActivity(t *testing.T) {
 			got := codexShowsActivity(tt.output)
 			if got != tt.want {
 				t.Errorf("codexShowsActivity() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClaudeShowsActivity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			name:   "running with down-token readout",
+			output: "● working on it\n\n✢ Running… (9m 45s · ↓ 41.0k tokens)\n────\n❯ \n  21% | 5h: 6% (3h 57m)",
+			want:   true,
+		},
+		{
+			name:   "cogitating with up-token readout",
+			output: "✻ Cogitating… (3s · ↑ 4.2k tokens)\n❯ \n",
+			want:   true,
+		},
+		{
+			// Just after a prompt is submitted the spinner shows no readout yet.
+			name:   "running spinner without readout",
+			output: "✻ Worked for 7m 31s\n❯ update the doc\n· Running…\n────\n❯ \n  27% | 5h: 15% (0h 49m)",
+			want:   true,
+		},
+		{
+			name:   "finished turn (past tense) is not busy",
+			output: "✻ Worked for 7m 31s\n────\n❯ \n────\n  27% | 5h: 15% (0h 49m) | 7d: 38% (Mon 23:00)",
+			want:   false,
+		},
+		{
+			name:   "fold indicator ellipsis is not busy",
+			output: "● Read(main.go)\n  … +15 lines (ctrl+o to expand)\n────\n❯ \n  17% | 5h: 15% (0h 52m)",
+			want:   false,
+		},
+		{
+			name:   "ellipsis in shown code is not busy",
+			output: "  // …\n  components.forEach((fn, name) => { /* … */ });\n────\n❯ \n  42% | 5h: 7% (3h 51m)",
+			want:   false,
+		},
+		{
+			name:   "esc to interrupt variant (case-insensitive)",
+			output: "✶ Thinking… (5s · Esc to interrupt)\n❯ \n",
+			want:   true,
+		},
+		{
+			// The agent is busy, but a multi-line draft in the composer (the
+			// user queuing their next message) pushes the live status line
+			// above the tail window. "esc to interrupt" must still be detected
+			// across the whole pane so the session is not misread as idle.
+			name: "esc to interrupt above a multi-line draft is still busy",
+			output: "✢ Running… (12s · esc to interrupt)\n" +
+				"╭──────────────────────────────╮\n" +
+				"│ > draft line 1                │\n" +
+				"│ draft line 2                  │\n" +
+				"│ draft line 3                  │\n" +
+				"│ draft line 4                  │\n" +
+				"│ draft line 5                  │\n" +
+				"│ draft line 6                  │\n" +
+				"╰──────────────────────────────╯\n" +
+				"  21% | 5h: 6% (3h 57m)        max",
+			want: true,
+		},
+		{
+			name:   "idle with percentage status line is not busy",
+			output: "╰──────────────╯\n❯ \n  21% | 5h: 6% (3h 57m) | 7d: 36% (Mon 23:00)        max",
+			want:   false,
+		},
+		{
+			name:   "idle composer only is not busy",
+			output: "╭──────────────╮\n│ > do the thing │\n╰──────────────╯\n",
+			want:   false,
+		},
+		{
+			// The "↑/↓ N tokens" readout appears only on the live status line, so
+			// it is trusted across the whole pane: a multi-line composer draft (the
+			// user queuing their next message) scrolls the status line above the
+			// tail window, but the running turn is still detected as busy. This is
+			// the common case for Claude versions whose status line shows the token
+			// readout but not an "esc to interrupt" hint.
+			name: "token readout above a multi-line draft is still busy",
+			output: "✢ Running… (5m 12s · ↓ 12.3k tokens)\n" +
+				"────────────────────────\n" +
+				"❯ user is typing\n" +
+				"  a multi line\n" +
+				"  draft message\n" +
+				"  that is fairly long\n" +
+				"  spanning many lines\n" +
+				"  to queue up next\n" +
+				"────────────────────────\n" +
+				"  21% | 5h: 6% (3h 57m)        Remote Control active",
+			want: true,
+		},
+		{
+			// A token mention without the ↑/↓ readout arrow (e.g. the
+			// "/clear to save N tokens" status-line hint) is not the live readout
+			// and must not be mistaken for activity, even outside the tail window.
+			name:   "non-readout token mention is ignored",
+			output: "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n❯ \n  21% | 5h: 6% (3h 51m)        new task? /clear to save 5.0k tokens",
+			want:   false,
+		},
+		{
+			name:   "empty output is treated as busy",
+			output: "",
+			want:   true,
+		},
+		{
+			name:   "whitespace only is treated as busy",
+			output: "   \n   \n",
+			want:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := claudeShowsActivity(tt.output)
+			if got != tt.want {
+				t.Errorf("claudeShowsActivity() = %v, want %v", got, tt.want)
 			}
 		})
 	}

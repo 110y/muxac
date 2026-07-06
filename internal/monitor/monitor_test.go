@@ -81,6 +81,7 @@ func newMonitorState() *monitorState {
 		capturePromptSeen:          make(map[string]bool),
 		captureRunningClearCount:   make(map[string]int),
 		captureRunningWaitingCount: make(map[string]int),
+		captureIdleRunningCount:    make(map[string]int),
 	}
 }
 
@@ -1416,6 +1417,263 @@ func TestSync(t *testing.T) {
 		}
 		if got != "idle" {
 			t.Errorf("got %q, want idle (an offer of options is not a permission prompt)", got)
+		}
+	})
+
+	t.Run("idle becomes running via capture-pane when the agent processes without a hook", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		// A new turn started on a session the hooks left marked idle — the
+		// UserPromptSubmit/PreToolUse hook was missed (e.g. a prompt submitted right
+		// after a resume). The live status line shows the agent working, so it must
+		// be surfaced as running instead of staying stuck at idle for the whole turn.
+		busyPane := "● working on it\n" +
+			"✢ Running… (12s · ↓ 3.4k tokens)\n" +
+			"────────────────────────────────────────\n" +
+			"❯ \n" +
+			"────────────────────────────────────────\n" +
+			"  21% | 5h: 6% (3h 57m)"
+		ft := &fakeTmux{
+			sessions:           map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{"muxac-default@home@user@project": busyPane},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "idle", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		state := newMonitorState()
+
+		// First sync arms the debounce; the session must not flip yet.
+		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+			t.Fatal(err)
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "idle" {
+			t.Fatalf("after first sync: got %q, want idle (debounce)", got)
+		}
+
+		// Second consecutive observation transitions to running.
+		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+			t.Fatal(err)
+		}
+		got, err = queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "running" {
+			t.Errorf("after second sync: got %q, want running", got)
+		}
+	})
+
+	t.Run("idle becomes running via capture-pane on the esc-to-interrupt hint alone", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		// Some Claude Code versions render no token readout but do render the
+		// "esc to interrupt" hint while busy; it alone must drive idle → running.
+		busyPane := "✢ Running… (1m 4s · esc to interrupt)\n" +
+			"────────────────────────────────────────\n" +
+			"❯ \n"
+		ft := &fakeTmux{
+			sessions:           map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{"muxac-default@home@user@project": busyPane},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "idle", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		state := newMonitorState()
+		for i := range 2 {
+			if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+				t.Fatalf("sync %d: %v", i, err)
+			}
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "running" {
+			t.Errorf("got %q, want running", got)
+		}
+	})
+
+	t.Run("idle stays idle when a finished frame's prose merely ends in an ellipsis", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		// A settled idle frame whose closing message ends in "…" matches the spinner
+		// ellipsis pattern claudeShowsActivity trusts in the tail, so the looser
+		// signal would falsely flip it to running. The idle → running detection must
+		// rely only on the unambiguous live-status-line signals (no "esc to
+		// interrupt", no "↑/↓ N tokens" readout here) and keep it idle.
+		idlePane := "● Done. Let me know if you want me to continue…\n" +
+			"────────────────────────────────────────\n" +
+			"❯ \n" +
+			"────────────────────────────────────────\n" +
+			"  9% | 5h: 27% (1h 37m)"
+		ft := &fakeTmux{
+			sessions:           map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{"muxac-default@home@user@project": idlePane},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "idle", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		state := newMonitorState()
+		for i := range 4 {
+			if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+				t.Fatalf("sync %d: %v", i, err)
+			}
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "idle" {
+			t.Errorf("got %q, want idle (prose ending in an ellipsis is not a running signal)", got)
+		}
+	})
+
+	t.Run("idle stays idle when the pane is momentarily blank", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		// claudeShowsActivity treats empty output as busy (the TUI may render nothing
+		// during a redraw); the idle → running detection must not, or a blank frame
+		// on a genuinely idle session would be mistaken for work.
+		ft := &fakeTmux{
+			sessions:           map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{"muxac-default@home@user@project": ""},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "idle", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		state := newMonitorState()
+		for i := range 4 {
+			if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+				t.Fatalf("sync %d: %v", i, err)
+			}
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "idle" {
+			t.Errorf("got %q, want idle (a blank frame is not a running signal)", got)
+		}
+	})
+
+	t.Run("idle to running debounce resets when activity is not sustained", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		busyPane := "✢ Running… (3s · ↓ 1.2k tokens)\n────\n❯ \n"
+		quietPane := "● Done.\n────\n❯ \n"
+		ft := &fakeTmux{
+			sessions:           map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{"muxac-default@home@user@project": busyPane},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "idle", UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		state := newMonitorState()
+
+		// Activity once: counter = 1.
+		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+			t.Fatal(err)
+		}
+		// Activity stops before the threshold: counter must reset.
+		ft.capturePaneOutputs["muxac-default@home@user@project"] = quietPane
+		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+			t.Fatal(err)
+		}
+		// Activity resumes: counter = 1 again, so still not enough to flip.
+		ft.capturePaneOutputs["muxac-default@home@user@project"] = busyPane
+		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+			t.Fatal(err)
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "idle" {
+			t.Errorf("got %q, want idle (debounce counter should have reset on the quiet frame)", got)
 		}
 	})
 
@@ -3198,6 +3456,91 @@ func TestClaudeShowsActivity(t *testing.T) {
 			got := claudeShowsActivity(tt.output)
 			if got != tt.want {
 				t.Errorf("claudeShowsActivity() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTerminalShowsClaudeRunning(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			name:   "esc to interrupt hint is running",
+			output: "✢ Running… (1m 4s · esc to interrupt)\n❯ \n",
+			want:   true,
+		},
+		{
+			name:   "esc to interrupt is case-insensitive",
+			output: "✶ Thinking… (5s · Esc to interrupt)\n❯ \n",
+			want:   true,
+		},
+		{
+			name:   "down-token readout is running",
+			output: "● working\n✢ Running… (9m 45s · ↓ 41.0k tokens)\n❯ \n",
+			want:   true,
+		},
+		{
+			name:   "up-token readout is running",
+			output: "✻ Cogitating… (3s · ↑ 4.2k tokens)\n❯ \n",
+			want:   true,
+		},
+		{
+			// The live readout uses non-breaking spaces; they must be normalized so
+			// the token pattern matches (Go's \s does not match U+00A0).
+			name:   "token readout with non-breaking spaces is running",
+			output: "✢ Running… (9m 45s · ↓ 41.0k tokens)\n❯ \n",
+			want:   true,
+		},
+		{
+			// Unlike claudeShowsActivity, empty output must NOT be treated as busy:
+			// this drives an idle session into running and a blank redraw frame must
+			// not be mistaken for work.
+			name:   "empty output is not running",
+			output: "",
+			want:   false,
+		},
+		{
+			name:   "whitespace only is not running",
+			output: "   \n   \n",
+			want:   false,
+		},
+		{
+			name:   "finished turn (past tense) is not running",
+			output: "✻ Worked for 7m 31s\n────\n❯ \n  27% | 5h: 15% (0h 49m)",
+			want:   false,
+		},
+		{
+			// A settled idle frame whose prose ends in an ellipsis matches the
+			// spinner pattern claudeShowsActivity trusts in the tail, but must NOT be
+			// reported as running here — that asymmetry is the whole point of this
+			// stricter check.
+			name:   "prose ending in an ellipsis is not running",
+			output: "● Done. Let me know if you want me to continue…\n────\n❯ \n",
+			want:   false,
+		},
+		{
+			name:   "fold indicator ellipsis is not running",
+			output: "● Read(main.go)\n  … +15 lines (ctrl+o to expand)\n────\n❯ \n",
+			want:   false,
+		},
+		{
+			name:   "non-readout token mention is not running",
+			output: "❯ \n  21% | 5h: 6% (3h 51m)        new task? /clear to save 5.0k tokens",
+			want:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := terminalShowsClaudeRunning(tt.output)
+			if got != tt.want {
+				t.Errorf("terminalShowsClaudeRunning() = %v, want %v", got, tt.want)
 			}
 		})
 	}

@@ -54,6 +54,17 @@ const captureRunningIdleThreshold = 8
 // still surfacing a real, stable prompt promptly.
 const captureWaitingPromptThreshold = 2
 
+// captureIdleRunningThreshold is how many consecutive sync ticks the live status
+// line must show the agent actively processing before an idle session is flipped
+// to running (see syncClaudeCodeSession). This is the counterpart to the
+// running→idle/​waiting fallbacks: the UserPromptSubmit/PreToolUse hook that
+// should move a session out of idle when a new turn begins can be missed (e.g. a
+// prompt submitted right after a resume, or work auto-continued after a
+// compaction), which would otherwise leave the session stuck at idle for the
+// whole turn. A small debounce ignores a single torn or anomalous capture while
+// still surfacing a genuinely running session within a couple of seconds.
+const captureIdleRunningThreshold = 2
+
 // waitingIdleClearThreshold is how many consecutive sync ticks a dismissed
 // permission prompt must show no agent activity — neither a processing status
 // line nor a freshly written conversation turn — before a waiting session is
@@ -110,6 +121,11 @@ type monitorState struct {
 	// detected purely from the terminal (a permission prompt appearing on a
 	// session the hooks left marked running; see syncClaudeCodeSession).
 	captureRunningWaitingCount map[string]int
+	// captureIdleRunningCount debounces the idle→running transition that is
+	// detected purely from the terminal (the live status line shows the agent
+	// processing on a session the hooks left marked idle; see
+	// syncClaudeCodeSession).
+	captureIdleRunningCount map[string]int
 }
 
 // Run starts a monitoring loop that syncs session statuses between tmux and the database.
@@ -121,6 +137,7 @@ func Run(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, hom
 		capturePromptSeen:          make(map[string]bool),
 		captureRunningClearCount:   make(map[string]int),
 		captureRunningWaitingCount: make(map[string]int),
+		captureIdleRunningCount:    make(map[string]int),
 	}
 
 	if err := sync(ctx, tmuxRunner, queries, homeDir, state); err != nil {
@@ -214,21 +231,37 @@ var claudeTokenReadoutPattern = regexp.MustCompile(`[↑↓]\s*\d[\d.,]*\s*[km]?
 // just above the input box.
 var claudeSpinnerPattern = regexp.MustCompile(`[a-z]…`)
 
+// terminalShowsClaudeRunning reports whether the captured terminal shows an
+// unambiguous live-status-line sign that the Claude Code agent is actively
+// processing a turn:
+//   - "esc to interrupt": the interrupt hint (absent in some versions).
+//   - the "↑/↓ N tokens" usage readout: present once the turn produces tokens.
+//
+// Both render only while a turn is in flight and never in a finished or idle
+// frame. Unlike claudeShowsActivity — which also trusts the spinner ellipsis in
+// the tail and treats empty output as busy — this never reports a settled idle
+// frame as running, even one whose closing prose merely ends in an ellipsis or
+// one momentarily blank during a redraw. That makes it safe to drive an idle
+// session *into* running (see syncClaudeCodeSession), where claudeShowsActivity's
+// empty-is-busy bias would otherwise cause false positives. The signals are
+// matched across the whole pane so content below the status line — a multi-line
+// composer draft, or an @-mention / slash-command menu — cannot scroll them out
+// of view and make a busy session look idle.
+func terminalShowsClaudeRunning(output string) bool {
+	output = strings.ReplaceAll(output, " ", " ")
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "esc to interrupt") || claudeTokenReadoutPattern.MatchString(lower)
+}
+
 // claudeShowsActivity reports whether the captured terminal indicates the Claude
 // Code agent is still busy. Empty output is treated as busy because the TUI may
 // briefly render nothing during transitions.
 func claudeShowsActivity(output string) bool {
 	output = strings.ReplaceAll(output, " ", " ")
 
-	lower := strings.ToLower(output)
-
-	// Signals rendered only on the live status line, never in the scrollback, are
-	// matched across the whole pane so content below the status line — a
-	// multi-line draft in the composer, or an @-mention / slash-command menu —
-	// cannot scroll them out of the tail window and make a busy session look idle:
-	//   - "esc to interrupt": the interrupt hint (absent in some versions).
-	//   - the "↑/↓ N tokens" usage readout: present once the turn produces tokens.
-	if strings.Contains(lower, "esc to interrupt") || claudeTokenReadoutPattern.MatchString(lower) {
+	// The unambiguous live-status-line signals are trusted across the whole pane
+	// (see terminalShowsClaudeRunning).
+	if terminalShowsClaudeRunning(output) {
 		return true
 	}
 
@@ -304,6 +337,7 @@ func syncSession(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Quer
 		delete(state.capturePromptSeen, sess.Name+":"+sess.Path)
 		delete(state.captureRunningClearCount, sess.Name+":"+sess.Path)
 		delete(state.captureRunningWaitingCount, sess.Name+":"+sess.Path)
+		delete(state.captureIdleRunningCount, sess.Name+":"+sess.Path)
 		return nil
 	}
 
@@ -498,6 +532,7 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 	if st == status.Running {
 		delete(state.capturePaneClearCount, sessionKey)
 		delete(state.capturePromptSeen, sessionKey)
+		delete(state.captureIdleRunningCount, sessionKey)
 
 		output, err := tmuxRunner.CapturePane(ctx, tmuxName)
 		if err != nil {
@@ -580,15 +615,20 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 		delete(state.capturePromptSeen, sessionKey)
 		delete(state.captureRunningClearCount, sessionKey)
 
-		// Idle → waiting via capture-pane: a permission prompt appeared on a
-		// session the hooks left marked idle (a missed or unmapped permission
-		// notification, or a status that lagged the agent). Surface it as waiting
-		// so it is shown as needing the user, rather than going idle → running →
-		// waiting once a later hook fires. Running is handled in the block above;
-		// other states have no prompt to detect.
 		if st == status.Idle {
 			output, err := tmuxRunner.CapturePane(ctx, tmuxName)
-			if err == nil && terminalShowsPermissionPrompt(output) {
+			if err != nil {
+				return nil // non-fatal; leave the debounce counters untouched
+			}
+
+			// Idle → waiting via capture-pane: a permission prompt appeared on a
+			// session the hooks left marked idle (a missed or unmapped permission
+			// notification, or a status that lagged the agent). Surface it as
+			// waiting so it is shown as needing the user, rather than going idle →
+			// running → waiting once a later hook fires. Checked before the activity
+			// probe below because a prompt is not the agent processing.
+			if terminalShowsPermissionPrompt(output) {
+				delete(state.captureIdleRunningCount, sessionKey)
 				state.captureRunningWaitingCount[sessionKey]++
 				if state.captureRunningWaitingCount[sessionKey] < captureWaitingPromptThreshold {
 					return nil // debounce: need a stable prompt, not a transient match
@@ -606,12 +646,45 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 				}
 				return nil
 			}
+			delete(state.captureRunningWaitingCount, sessionKey)
+
+			// Idle → running via capture-pane: the live status line shows the agent
+			// actively processing a turn, but no UserPromptSubmit/PreToolUse hook
+			// moved it out of idle. Those hooks are missed often enough in practice
+			// (a prompt submitted right after a resume, or work auto-continued after
+			// a compaction) that without this fallback the session stays stuck at
+			// "idle" for the whole turn. Only the unambiguous live-status-line
+			// signals are trusted (see terminalShowsClaudeRunning) so a settled idle
+			// frame — whose closing prose may merely end in an ellipsis — is never
+			// mistaken for work; debounced for robustness against a torn capture.
+			if terminalShowsClaudeRunning(output) {
+				state.captureIdleRunningCount[sessionKey]++
+				if state.captureIdleRunningCount[sessionKey] < captureIdleRunningThreshold {
+					return nil // debounce: need a stable activity signal
+				}
+				delete(state.captureIdleRunningCount, sessionKey)
+				if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
+					Status:       string(status.Running),
+					UpdatedAt:    timestamp.Now(),
+					WaitingSince: "",
+					Name:         sess.Name,
+					Path:         sess.Path,
+					Status_2:     string(st),
+				}); err != nil {
+					return fmt.Errorf("update claude status to running via capture-pane: %w", err)
+				}
+				return nil
+			}
+			delete(state.captureIdleRunningCount, sessionKey)
+			return nil
 		}
 		delete(state.captureRunningWaitingCount, sessionKey)
+		delete(state.captureIdleRunningCount, sessionKey)
 		return nil
 	}
 	delete(state.captureRunningClearCount, sessionKey)
 	delete(state.captureRunningWaitingCount, sessionKey)
+	delete(state.captureIdleRunningCount, sessionKey)
 	output, err := tmuxRunner.CapturePane(ctx, tmuxName)
 	if err != nil {
 		return nil // non-fatal

@@ -48,7 +48,7 @@ func TestFormatEntries(t *testing.T) {
 		t.Parallel()
 		var buf bytes.Buffer
 		entries := []entry{
-			{name: "default", status: status.Running, path: "/home/user/project"},
+			{name: "default", status: status.Running, path: "/home/user/project", updatedAt: "2026-07-06T01:02:03.456Z"},
 		}
 		formatEntries(&buf, entries, Options{})
 		output := buf.String()
@@ -62,8 +62,14 @@ func TestFormatEntries(t *testing.T) {
 		if !strings.Contains(output, "DIRECTORY") {
 			t.Errorf("expected header with 'DIRECTORY', got %q", output)
 		}
+		if !strings.Contains(output, "UPDATED") {
+			t.Errorf("expected header with 'UPDATED', got %q", output)
+		}
 		if !strings.Contains(output, "default") {
 			t.Errorf("expected entry name 'default', got %q", output)
+		}
+		if !strings.Contains(output, "2026-07-06T01:02:03.456Z") {
+			t.Errorf("expected entry updated timestamp, got %q", output)
 		}
 	})
 
@@ -127,11 +133,12 @@ func TestRun(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		queries := database.SetupTestDB(t)
+		now := timestamp.Now()
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
 			Name:      "default",
 			Path:      "/home/user/project",
 			Status:    "running",
-			UpdatedAt: timestamp.Now(),
+			UpdatedAt: now,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -151,6 +158,9 @@ func TestRun(t *testing.T) {
 		}
 		if !strings.Contains(output, "/home/user/project") {
 			t.Errorf("expected output to contain path, got %q", output)
+		}
+		if !strings.Contains(output, now) {
+			t.Errorf("expected output to contain updated timestamp %q, got %q", now, output)
 		}
 	})
 
@@ -220,11 +230,12 @@ func TestRun(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		queries := database.SetupTestDB(t)
+		now := timestamp.Now()
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
 			Name:      "default",
 			Path:      "/home/user/project",
 			Status:    "running",
-			UpdatedAt: timestamp.Now(),
+			UpdatedAt: now,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -251,6 +262,9 @@ func TestRun(t *testing.T) {
 		}
 		if s.Directory != "/home/user/project" {
 			t.Errorf("directory = %q, want %q", s.Directory, "/home/user/project")
+		}
+		if s.UpdatedAt != now {
+			t.Errorf("updated_at = %q, want %q", s.UpdatedAt, now)
 		}
 	})
 

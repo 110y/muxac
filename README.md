@@ -29,10 +29,10 @@ $ muxac new claude
 # List all sessions with their status.
 $ muxac list
 
-DIRECTORY               NAME     STATUS
-/path/to/workspace-1    default  running
-/path/to/workspace-2    foo      waiting
-/path/to/workspace-3    bar      idle
+DIRECTORY               NAME     STATUS   UPDATED
+/path/to/workspace-1    default  running  2026-07-06T09:12:31.201Z
+/path/to/workspace-2    foo      waiting  2026-07-06T09:10:05.847Z
+/path/to/workspace-3    bar      idle     2026-07-06T08:55:12.006Z
 
 # Attach to an existing session for the current directory.
 $ muxac attach
@@ -293,7 +293,7 @@ $ muxac new [--name <name>] [--dir <path>] [--env KEY=VALUE ...] [--tmux-conf <p
 
 ### `muxac list`
 
-Lists all `muxac` sessions with their status.
+Lists all `muxac` sessions with their status. The `UPDATED` column shows the last update time of each session as a UTC timestamp in ISO 8601 format, so the output can be sorted lexicographically by that column (e.g. with `sort`).
 
 ```bash
 $ muxac list [--no-header] [--json]
@@ -306,9 +306,9 @@ $ muxac list [--no-header] [--json]
 
 ```bash
 $ muxac list
-DIRECTORY          NAME     STATUS
-/home/user/myapp   default  running
-/home/user/api     backend  waiting
+DIRECTORY          NAME     STATUS   UPDATED
+/home/user/myapp   default  running  2026-07-06T09:12:31.201Z
+/home/user/api     backend  waiting  2026-07-06T09:10:05.847Z
 ```
 
 ### `muxac attach`

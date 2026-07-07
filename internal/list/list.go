@@ -27,13 +27,15 @@ type jsonEntry struct {
 	Directory string `json:"directory"`
 	Name      string `json:"name"`
 	Status    string `json:"status"`
+	UpdatedAt string `json:"updated_at"`
 }
 
 // entry represents a single session entry for display.
 type entry struct {
-	name   string
-	status status.Status
-	path   string
+	name      string
+	status    status.Status
+	path      string
+	updatedAt string
 }
 
 // sortEntries sorts entries by directory then by session name.
@@ -54,6 +56,7 @@ func formatEntries(w io.Writer, entries []entry, opts Options) {
 
 	pathWidth := len("DIRECTORY")
 	nameWidth := len("NAME")
+	statusWidth := len("STATUS")
 	for _, e := range entries {
 		if len(e.path) > pathWidth {
 			pathWidth = len(e.path)
@@ -61,15 +64,18 @@ func formatEntries(w io.Writer, entries []entry, opts Options) {
 		if len(e.name) > nameWidth {
 			nameWidth = len(e.name)
 		}
+		if len(e.status) > statusWidth {
+			statusWidth = len(e.status)
+		}
 	}
 
 	if !opts.NoHeader {
-		header := fmt.Sprintf("%-*s  %-*s  STATUS", pathWidth, "DIRECTORY", nameWidth, "NAME")
+		header := fmt.Sprintf("%-*s  %-*s  %-*s  UPDATED", pathWidth, "DIRECTORY", nameWidth, "NAME", statusWidth, "STATUS")
 		fmt.Fprintln(w, header)
 	}
 
 	for _, e := range entries {
-		line := fmt.Sprintf("%-*s  %-*s  %s", pathWidth, e.path, nameWidth, e.name, string(e.status))
+		line := fmt.Sprintf("%-*s  %-*s  %-*s  %s", pathWidth, e.path, nameWidth, e.name, statusWidth, string(e.status), e.updatedAt)
 		fmt.Fprintln(w, line)
 	}
 }
@@ -84,9 +90,10 @@ func Run(ctx context.Context, w io.Writer, queries *sqlc.Queries, opts Options) 
 	var entries []entry
 	for _, sess := range dbSessions {
 		entries = append(entries, entry{
-			name:   sess.Name,
-			status: status.Status(sess.Status),
-			path:   sess.Path,
+			name:      sess.Name,
+			status:    status.Status(sess.Status),
+			path:      sess.Path,
+			updatedAt: sess.UpdatedAt,
 		})
 	}
 
@@ -99,6 +106,7 @@ func Run(ctx context.Context, w io.Writer, queries *sqlc.Queries, opts Options) 
 				Directory: e.path,
 				Name:      e.name,
 				Status:    string(e.status),
+				UpdatedAt: e.updatedAt,
 			}
 		}
 		out := jsonOutput{Sessions: jsonEntries}

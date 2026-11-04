@@ -74,6 +74,21 @@ func Run(ctx context.Context, r io.Reader, tmuxRunner tmux.Runner, queries *sqlc
 		return nil
 	}
 
+	// While a Claude Code session waits at a permission prompt, PostToolUse
+	// events keep arriving: the prompt blocks only the main conversation, so
+	// concurrently running subagents — teammates, background tasks, parallel
+	// tool calls — still complete tools of their own the whole time. Treating
+	// those as the agent resuming would flip the session to running while the
+	// prompt is still on screen, and the monitor's capture-pane detection
+	// would flip it back — flickering running↔waiting until the prompt is
+	// answered. Leaving the waiting state is therefore owned by the monitor,
+	// which verifies via capture-pane that the prompt is actually gone. Codex
+	// keeps the hook-driven transition: it runs no concurrent tools while
+	// blocked and has no capture-pane waiting→running fallback.
+	if tool == agent.Claude && current == status.Waiting && event == "PostToolUse" {
+		return nil
+	}
+
 	if target != current {
 		var waitingSince string
 		if target == status.Waiting {

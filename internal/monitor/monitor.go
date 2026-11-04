@@ -68,12 +68,25 @@ const captureIdleRunningThreshold = 2
 // waitingIdleClearThreshold is how many consecutive sync ticks a dismissed
 // permission prompt must show no agent activity — neither a processing status
 // line nor a freshly written conversation turn — before a waiting session is
-// moved to idle. It debounces transient blank frames and, crucially, gives a
-// just-approved session time to start rendering its work (the brief gap between
-// the prompt closing and the next "Running…"/tool output, e.g. while a quick
-// approved edit is followed by model-invocation latency). Without that margin an
-// approved, working session can be momentarily mislabeled idle.
+// moved to idle. It debounces transient capture anomalies and, crucially, gives
+// a just-approved session time to start rendering its work (the brief gap
+// between the prompt closing and the next "Running…"/tool output, e.g. while a
+// quick approved edit is followed by model-invocation latency). Without that
+// margin an approved, working session can be momentarily mislabeled idle.
 const waitingIdleClearThreshold = 3
+
+// captureWaitingRunningThreshold is how many consecutive sync ticks a dismissed
+// permission prompt must show agent activity — a processing status line or a
+// freshly written conversation turn — before a waiting session is moved to
+// running. This is the counterpart to waitingIdleClearThreshold for the
+// approved case. A capture can catch the pane mid-redraw with the dialog region
+// already cleared while content below it is still drawn — and that content can
+// look busy on its own (a teammate/background-task panel renders per-agent
+// "↑/↓ N tokens" readouts under the input area). Without a debounce one such
+// torn frame flips a still-waiting session to running, and the prompt is then
+// re-detected — a running↔waiting flicker. A real approval shows activity on
+// every subsequent tick, so it is still surfaced one tick later.
+const captureWaitingRunningThreshold = 2
 
 // conversationRecentlyWritten reports whether maxConvTimestamp — the timestamp of
 // the most recent user/assistant transcript line — is within d of now. An empty
@@ -126,6 +139,10 @@ type monitorState struct {
 	// processing on a session the hooks left marked idle; see
 	// syncClaudeCodeSession).
 	captureIdleRunningCount map[string]int
+	// captureWaitingRunningCount debounces the waiting→running transition that
+	// is detected from the terminal after a permission prompt disappears (see
+	// syncClaudeCodeSession).
+	captureWaitingRunningCount map[string]int
 }
 
 // Run starts a monitoring loop that syncs session statuses between tmux and the database.
@@ -138,6 +155,7 @@ func Run(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, hom
 		captureRunningClearCount:   make(map[string]int),
 		captureRunningWaitingCount: make(map[string]int),
 		captureIdleRunningCount:    make(map[string]int),
+		captureWaitingRunningCount: make(map[string]int),
 	}
 
 	if err := sync(ctx, tmuxRunner, queries, homeDir, state); err != nil {
@@ -338,6 +356,7 @@ func syncSession(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Quer
 		delete(state.captureRunningClearCount, sess.Name+":"+sess.Path)
 		delete(state.captureRunningWaitingCount, sess.Name+":"+sess.Path)
 		delete(state.captureIdleRunningCount, sess.Name+":"+sess.Path)
+		delete(state.captureWaitingRunningCount, sess.Name+":"+sess.Path)
 		return nil
 	}
 
@@ -519,6 +538,7 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 							return fmt.Errorf("update status to running: %w", err)
 						}
 						delete(state.capturePaneClearCount, sessionKey)
+						delete(state.captureWaitingRunningCount, sessionKey)
 						return nil
 					}
 				}
@@ -533,6 +553,7 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 		delete(state.capturePaneClearCount, sessionKey)
 		delete(state.capturePromptSeen, sessionKey)
 		delete(state.captureIdleRunningCount, sessionKey)
+		delete(state.captureWaitingRunningCount, sessionKey)
 
 		output, err := tmuxRunner.CapturePane(ctx, tmuxName)
 		if err != nil {
@@ -614,6 +635,7 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 		delete(state.capturePaneClearCount, sessionKey)
 		delete(state.capturePromptSeen, sessionKey)
 		delete(state.captureRunningClearCount, sessionKey)
+		delete(state.captureWaitingRunningCount, sessionKey)
 
 		if st == status.Idle {
 			output, err := tmuxRunner.CapturePane(ctx, tmuxName)
@@ -690,8 +712,18 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 		return nil // non-fatal
 	}
 
+	// A blank capture is a frame caught mid-redraw and carries no information
+	// about the prompt. Skip the tick without touching any debounce counter:
+	// counting it as "prompt dismissed" would let a single blank frame push a
+	// still-waiting session towards running (claudeShowsActivity treats empty
+	// output as busy) or idle.
+	if strings.TrimSpace(output) == "" {
+		return nil
+	}
+
 	if terminalShowsWaitingPrompt(output) {
 		state.capturePaneClearCount[sessionKey] = 0
+		delete(state.captureWaitingRunningCount, sessionKey)
 		state.capturePromptSeen[sessionKey] = true
 		return nil
 	}
@@ -707,11 +739,20 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 	//
 	// Approved: the agent resumes, so either the terminal shows its processing
 	// status line or the transcript gains a fresh conversation turn (e.g. the
-	// tool_result of a just-approved tool). Switch to running the moment either
-	// positive signal appears — without waiting out the idle debounce — so an
-	// approved, working session is never briefly shown idle while it spins back up
-	// (the gap between the prompt closing and the next "Running…"/tool output).
+	// tool_result of a just-approved tool). Either positive signal moves the
+	// session to running without waiting out the idle debounce, so an approved,
+	// working session is never briefly shown idle while it spins back up (the
+	// gap between the prompt closing and the next "Running…"/tool output). A
+	// short debounce of its own guards the other direction: a torn capture can
+	// hide the still-open prompt while busy-looking content below it (e.g. a
+	// teammate panel's token readouts) shows "activity", and acting on that
+	// single frame would flick the session running↔waiting.
 	if claudeShowsActivity(output) || conversationRecentlyWritten(maxConvTimestamp, claudeActiveQuietPeriod) {
+		state.captureWaitingRunningCount[sessionKey]++
+		if state.captureWaitingRunningCount[sessionKey] < captureWaitingRunningThreshold {
+			return nil // debounce: need sustained activity, not a single torn frame
+		}
+		delete(state.captureWaitingRunningCount, sessionKey)
 		delete(state.capturePaneClearCount, sessionKey)
 		delete(state.capturePromptSeen, sessionKey)
 		if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
@@ -741,6 +782,7 @@ func syncClaudeCodeSession(ctx context.Context, queries *sqlc.Queries, homeDir s
 	}
 	delete(state.capturePaneClearCount, sessionKey)
 	delete(state.capturePromptSeen, sessionKey)
+	delete(state.captureWaitingRunningCount, sessionKey)
 	if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
 		Status:       string(status.Idle),
 		UpdatedAt:    timestamp.Now(),

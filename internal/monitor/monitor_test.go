@@ -82,6 +82,7 @@ func newMonitorState() *monitorState {
 		captureRunningClearCount:   make(map[string]int),
 		captureRunningWaitingCount: make(map[string]int),
 		captureIdleRunningCount:    make(map[string]int),
+		captureWaitingRunningCount: make(map[string]int),
 	}
 }
 
@@ -2246,8 +2247,8 @@ func TestSync(t *testing.T) {
 
 		// Prompt disappears and the agent resumes (user accepted): the terminal
 		// now shows the live processing status line. Activity is positive evidence
-		// of resumption, so the transition to running happens immediately, without
-		// waiting out the idle debounce.
+		// of resumption, so the transition to running happens after the short
+		// torn-frame debounce, without waiting out the idle debounce.
 		ft.capturePaneOutputs["muxac-default@home@user@project"] = "Some output\n✢ Running… (3s · ↓ 1.2k tokens)\n"
 
 		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
@@ -2259,8 +2260,21 @@ func TestSync(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if got != "waiting" {
+			t.Errorf("after a single activity frame: got %q, want waiting (torn-frame debounce)", got)
+		}
+
+		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+			t.Fatal(err)
+		}
+		got, err = queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+			Name: "default", Path: "/home/user/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
 		if got != "running" {
-			t.Errorf("after prompt dismissed with activity: got %q, want running", got)
+			t.Errorf("after prompt dismissed with sustained activity: got %q, want running", got)
 		}
 	})
 
@@ -2454,6 +2468,145 @@ func TestSync(t *testing.T) {
 		}
 		if got != "waiting" {
 			t.Errorf("got %q, want waiting (prompt is visible)", got)
+		}
+	})
+
+	t.Run("waiting survives torn capture frames that hide the prompt behind busy content", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		// A session running teammates/background tasks renders a panel below the
+		// dialog with per-agent "↑/↓ N tokens" readouts. A capture caught
+		// mid-redraw can show only that busy-looking bottom section while the
+		// still-open dialog is missing from the frame. A single such frame must
+		// not flip the session to running — that would flicker running↔waiting
+		// for as long as the prompt stays up.
+		tornPane := "  15% | 5h: 28% (0h 0m) | 7d: 8% (Mon 23:00)        /rc\n" +
+			"  ⏸ manual mode on\n" +
+			"  ● main\n" +
+			"  ◯ cat4-agent         research the competitors   11m 34s · ↓ 75.2k tokens\n" +
+			"  ↓ 4 more\n"
+		promptPane := "● Skill(claude-in-chrome)\n" +
+			"\n" +
+			" Use skill \"claude-in-chrome\"?\n" +
+			" Claude may use instructions, code, or files from this Skill.\n" +
+			"\n" +
+			"   Automates your Chrome browser to interact with web pages.\n" +
+			"\n" +
+			" Do you want to proceed?\n" +
+			" ❯ 1. Yes\n" +
+			"   2. Yes, and don't ask again for claude-in-chrome in /home/user/project\n" +
+			"   3. No\n" +
+			"\n" +
+			" Esc to cancel · Tab to amend\n" +
+			"\n" +
+			tornPane
+		ft := &fakeTmux{
+			sessions:           map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{"muxac-default@home@user@project": promptPane},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		state := newMonitorState()
+
+		// The prompt stays open the whole time; every other capture is torn.
+		for i, pane := range []string{promptPane, tornPane, promptPane, tornPane, promptPane} {
+			ft.capturePaneOutputs["muxac-default@home@user@project"] = pane
+			if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+				t.Fatal(err)
+			}
+			got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != "waiting" {
+				t.Fatalf("sync %d: got %q, want waiting (isolated torn frames must not end the waiting state)", i+1, got)
+			}
+		}
+
+		// A real dismissal shows busy frames on consecutive ticks and must still
+		// be surfaced as running.
+		ft.capturePaneOutputs["muxac-default@home@user@project"] = tornPane
+		for range 2 {
+			if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "running" {
+			t.Errorf("after sustained activity: got %q, want running", got)
+		}
+	})
+
+	t.Run("waiting ignores blank capture frames", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		// The TUI may render nothing for a frame mid-redraw. A blank capture
+		// carries no information, and claudeShowsActivity treats empty output as
+		// busy — so counting it as "prompt dismissed" would flip the session to
+		// running while the prompt is still up.
+		promptPane := "  Do you want to proceed?\n  Yes, allow once\n  Yes, allow always\n"
+		ft := &fakeTmux{
+			sessions:           map[string]bool{"muxac-default@home@user@project": true},
+			capturePaneOutputs: map[string]string{"muxac-default@home@user@project": promptPane},
+		}
+		queries := database.SetupTestDB(t)
+		homeDir := t.TempDir()
+
+		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+			Name: "default", Path: "/home/user/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentSessionID(ctx, sqlc.UpdateAgentSessionIDParams{
+			AgentSessionID: "sess-123", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+			AgentTool: "claude", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		state := newMonitorState()
+
+		// First sync: prompt visible, capturePromptSeen is set.
+		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+			t.Fatal(err)
+		}
+
+		for i, pane := range []string{"", "\n   \n\t\n", "", promptPane} {
+			ft.capturePaneOutputs["muxac-default@home@user@project"] = pane
+			if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+				t.Fatal(err)
+			}
+			got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != "waiting" {
+				t.Fatalf("sync %d: got %q, want waiting (blank frames carry no information)", i+1, got)
+			}
 		}
 	})
 

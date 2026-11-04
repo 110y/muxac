@@ -321,10 +321,17 @@ func TestRunWithCurrentState(t *testing.T) {
 			wantStatus:    "waiting",
 		},
 		{
-			name:          "waiting + PostToolUse becomes running",
+			// A PostToolUse while waiting comes from a concurrently running
+			// subagent (teammate, background task, parallel tool call) whose
+			// tool completed while the permission prompt still blocks the main
+			// conversation. It must not flip the session to running — that
+			// would flicker running↔waiting against the monitor's capture-pane
+			// detection. The monitor moves the session out of waiting once the
+			// prompt is actually gone.
+			name:          "waiting + PostToolUse stays waiting",
 			initialStatus: "waiting",
 			input:         `{"hook_event_name": "PostToolUse"}`,
-			wantStatus:    "running",
+			wantStatus:    "waiting",
 		},
 		{
 			name:          "waiting + Stop stays waiting",
@@ -414,6 +421,63 @@ func TestRunWithCurrentState(t *testing.T) {
 
 			r := strings.NewReader(tt.input)
 			if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Claude); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{
+				Name: "default", Path: "/project",
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.wantStatus {
+				t.Errorf("status = %q, want %q", got, tt.wantStatus)
+			}
+		})
+	}
+}
+
+func TestRunWithCurrentState_Codex(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		initialStatus string
+		input         string
+		wantStatus    string
+	}{
+		{
+			// Codex has no capture-pane waiting→running fallback, so the
+			// hook-driven transition after an approved tool completes must be
+			// preserved — the Claude-specific waiting+PostToolUse guard does
+			// not apply.
+			name:          "waiting + PostToolUse becomes running",
+			initialStatus: "waiting",
+			input:         `{"hook_event_name": "PostToolUse", "cwd": "/project"}`,
+			wantStatus:    "running",
+		},
+		{
+			name:          "waiting + Stop stays waiting",
+			initialStatus: "waiting",
+			input:         `{"hook_event_name": "Stop", "cwd": "/project"}`,
+			wantStatus:    "waiting",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			queries := database.SetupTestDB(t)
+
+			if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+				Name: "default", Path: "/project", Status: tt.initialStatus, UpdatedAt: timestamp.Now(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			r := strings.NewReader(tt.input)
+			if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Codex); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 

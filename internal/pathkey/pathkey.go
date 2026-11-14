@@ -13,11 +13,3 @@ func fromDir(dir string) string {
 func TmuxSessionName(name, dir string) string {
 	return "muxac-" + name + fromDir(dir)
 }
-
-// ClaudeProjectDir converts a directory path to Claude Code's project directory encoding
-// by replacing "/" with "-" (e.g., "/home/user/project" becomes "-home-user-project").
-func ClaudeProjectDir(dir string) string {
-	s := strings.ReplaceAll(dir, "/", "-")
-	s = strings.ReplaceAll(s, ".", "-")
-	return s
-}

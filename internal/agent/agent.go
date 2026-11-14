@@ -1,10 +1,6 @@
 package agent
 
-import (
-	"path/filepath"
-
-	"github.com/110y/muxac/internal/pathkey"
-)
+import "path/filepath"
 
 // EnvSessionName is the environment variable used to pass the muxac session name.
 const EnvSessionName = "MUXAC_SESSION_NAME"
@@ -95,22 +91,6 @@ func ToolFromString(s string) Tool {
 	default:
 		return Unknown
 	}
-}
-
-// JsonlPath returns the tool-specific JSONL file path.
-// Returns "" for tools that do not support JSONL.
-func JsonlPath(tool Tool, homeDir, projectDir, sessionID string) string {
-	switch tool {
-	case Claude:
-		return filepath.Join(homeDir, ".claude", "projects", pathkey.ClaudeProjectDir(projectDir), sessionID+".jsonl")
-	case Codex:
-		return ""
-	case Gemini:
-		return ""
-	case Unknown:
-		return ""
-	}
-	return ""
 }
 
 // GeminiSessionFilePattern returns a glob pattern that matches the Gemini CLI

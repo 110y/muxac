@@ -42,10 +42,9 @@ linters:
     exhaustive:
       check:
         - switch
-        - map
+        - mapliteral
       default-signifies-exhaustive: false
-      explicit-exhaustive-map: true
-      explicit-exhaustive-switch: true
+      explicit-exhaustive: true
     gosec:
       excludes:
         - G115

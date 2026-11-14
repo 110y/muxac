@@ -57,91 +57,9 @@ Download the binary from the [release page](https://github.com/110y/muxac/releas
 <details>
 <summary>Claude Code</summary>
 
-Add the following hook configuration to your Claude Code settings file (e.g. `~/.claude/settings.json`):
+Use Claude Code v2.1.295 or later (for OSC 7501).
 
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "muxac hook"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "muxac hook"
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "muxac hook"
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "muxac hook"
-          }
-        ]
-      }
-    ],
-    "SessionStart": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "muxac hook"
-          }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "muxac hook"
-          }
-        ]
-      }
-    ],
-    "PermissionRequest": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "muxac hook"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
+> **Note:** Setting `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` also disables OSC 7501, and muxac then cannot track the session's status.
 
 </details>
 

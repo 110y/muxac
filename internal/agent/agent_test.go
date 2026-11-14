@@ -235,46 +235,6 @@ func TestToolFromString(t *testing.T) {
 	}
 }
 
-func TestJsonlPath(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name       string
-		tool       agent.Tool
-		homeDir    string
-		projectDir string
-		sessionID  string
-		want       string
-	}{
-		{
-			name:       "Claude returns full path",
-			tool:       agent.Claude,
-			homeDir:    "/home/user",
-			projectDir: "/home/user/project",
-			sessionID:  "sess-123",
-			want:       filepath.Join("/home/user", ".claude", "projects", "-home-user-project", "sess-123.jsonl"),
-		},
-		{
-			name:       "Unknown returns empty",
-			tool:       agent.Unknown,
-			homeDir:    "/home/user",
-			projectDir: "/home/user/project",
-			sessionID:  "sess-123",
-			want:       "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := agent.JsonlPath(tt.tool, tt.homeDir, tt.projectDir, tt.sessionID)
-			if got != tt.want {
-				t.Errorf("JsonlPath() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestGeminiSessionFilePattern(t *testing.T) {
 	t.Parallel()
 

@@ -23,8 +23,11 @@ type hookInput struct {
 
 // Run reads a hook event from r and upserts the corresponding session status in the database.
 // sessionName comes from the MUXAC_SESSION_NAME env var, projectDir from the detected tool's project dir.
+//
+// Claude Code's events are ignored: it reports its status through the Program
+// Status Protocol (OSC 7501), which `muxac wrap` reads from its terminal.
 func Run(ctx context.Context, r io.Reader, tmuxRunner tmux.Runner, queries *sqlc.Queries, sessionName, projectDir string, tool agent.Tool) error {
-	if sessionName == "" {
+	if sessionName == "" || tool == agent.Claude {
 		return nil
 	}
 
@@ -33,8 +36,9 @@ func Run(ctx context.Context, r io.Reader, tmuxRunner tmux.Runner, queries *sqlc
 		return err
 	}
 
+	// Gemini CLI reports a permission request as a ToolPermission notification.
 	eventName := input.HookEventName
-	if eventName == "Notification" && (input.NotificationType == "permission_prompt" || input.NotificationType == "ToolPermission") {
+	if eventName == "Notification" && input.NotificationType == "ToolPermission" {
 		eventName = "PermissionRequest"
 	}
 
@@ -51,6 +55,22 @@ func Run(ctx context.Context, r io.Reader, tmuxRunner tmux.Runner, queries *sqlc
 	// would otherwise create a phantom session row keyed on its own cwd, even
 	// though no muxac tmux session exists for that directory.
 	if !tmuxRunner.HasSession(ctx, pathkey.TmuxSessionName(sessionName, projectDir)) {
+		return nil
+	}
+
+	// Once the agent reports its status through the Program Status Protocol
+	// (OSC 7501), `muxac wrap` keeps the session status in sync with those
+	// reports, which cover every transition — including the ones no hook fires
+	// for, such as a permission prompt dismissed with Escape. Hook events would
+	// only race with them, so they are ignored for such a session.
+	programStatus, err := queries.GetSessionProgramStatus(ctx, sqlc.GetSessionProgramStatusParams{
+		Name: sessionName,
+		Path: projectDir,
+	})
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if programStatus != 0 {
 		return nil
 	}
 
@@ -75,16 +95,11 @@ func Run(ctx context.Context, r io.Reader, tmuxRunner tmux.Runner, queries *sqlc
 	}
 
 	if target != current {
-		var waitingSince string
-		if target == status.Waiting {
-			waitingSince = timestamp.Now()
-		}
 		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name:         sessionName,
-			Path:         projectDir,
-			Status:       string(target),
-			UpdatedAt:    timestamp.Now(),
-			WaitingSince: waitingSince,
+			Name:      sessionName,
+			Path:      projectDir,
+			Status:    string(target),
+			UpdatedAt: timestamp.Now(),
 		}); err != nil {
 			return err
 		}

@@ -45,47 +45,6 @@ func Test_fromDir(t *testing.T) {
 	}
 }
 
-func TestClaudeProjectDir(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		dir  string
-		want string
-	}{
-		{
-			name: "simple path without dots",
-			dir:  "/home/user/project",
-			want: "-home-user-project",
-		},
-		{
-			name: "path with domain dot",
-			dir:  "/home/user/go/src/github.com/org/repo",
-			want: "-home-user-go-src-github-com-org-repo",
-		},
-		{
-			name: "path with hidden directory dot",
-			dir:  "/home/user/.config/app",
-			want: "-home-user--config-app",
-		},
-		{
-			name: "root path",
-			dir:  "/",
-			want: "-",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := ClaudeProjectDir(tt.dir)
-			if got != tt.want {
-				t.Errorf("ClaudeProjectDir(%q) = %q, want %q", tt.dir, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestTmuxSessionName(t *testing.T) {
 	t.Parallel()
 

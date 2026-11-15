@@ -6,7 +6,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     agent_tool         TEXT NOT NULL DEFAULT '' CHECK (agent_tool IN ('', 'claude', 'codex', 'gemini')),
     created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    waiting_since      TEXT NOT NULL DEFAULT '',
+    -- 1 once the agent has reported its status through the Program Status
+    -- Protocol (OSC 7501). Such a session's status is owned by `muxac wrap`,
+    -- so hook events and the monitor's heuristics leave it alone.
+    program_status     INTEGER NOT NULL DEFAULT 0 CHECK (program_status IN (0, 1)),
     PRIMARY KEY (path, name)
 );
 

@@ -54,7 +54,7 @@ func TestRun(t *testing.T) {
 			input:       `{"hook_event_name": "UserPromptSubmit"}`,
 			sessionName: "default",
 			projectDir:  "/home/user/project",
-			tool:        agent.Claude,
+			tool:        agent.Codex,
 			wantName:    "default",
 			wantPath:    "/home/user/project",
 			wantStatus:  "running",
@@ -64,7 +64,7 @@ func TestRun(t *testing.T) {
 			input:       `{"hook_event_name": "PermissionRequest"}`,
 			sessionName: "default",
 			projectDir:  "/home/user/project",
-			tool:        agent.Claude,
+			tool:        agent.Codex,
 			wantName:    "default",
 			wantPath:    "/home/user/project",
 			wantStatus:  "waiting",
@@ -74,7 +74,7 @@ func TestRun(t *testing.T) {
 			input:       `{"hook_event_name": "PostToolUse"}`,
 			sessionName: "default",
 			projectDir:  "/home/user/project",
-			tool:        agent.Claude,
+			tool:        agent.Codex,
 			wantName:    "default",
 			wantPath:    "/home/user/project",
 			wantStatus:  "running",
@@ -84,7 +84,7 @@ func TestRun(t *testing.T) {
 			input:       `{"hook_event_name": "Stop"}`,
 			sessionName: "default",
 			projectDir:  "/home/user/project",
-			tool:        agent.Claude,
+			tool:        agent.Codex,
 			wantName:    "default",
 			wantPath:    "/home/user/project",
 			wantStatus:  "idle",
@@ -94,7 +94,7 @@ func TestRun(t *testing.T) {
 			input:       `{"hook_event_name": "Stop"}`,
 			sessionName: "foo",
 			projectDir:  "/home/user/project",
-			tool:        agent.Claude,
+			tool:        agent.Codex,
 			wantName:    "foo",
 			wantPath:    "/home/user/project",
 			wantStatus:  "idle",
@@ -104,7 +104,7 @@ func TestRun(t *testing.T) {
 			input:       `{"hook_event_name": "SomeOtherEvent"}`,
 			sessionName: "default",
 			projectDir:  "/home/user/project",
-			tool:        agent.Claude,
+			tool:        agent.Codex,
 			wantNoop:    true,
 		},
 		{
@@ -112,7 +112,7 @@ func TestRun(t *testing.T) {
 			input:       `{"hook_event_name": "Stop"}`,
 			sessionName: "",
 			projectDir:  "/home/user/project",
-			tool:        agent.Claude,
+			tool:        agent.Codex,
 			wantNoop:    true,
 		},
 		{
@@ -120,7 +120,7 @@ func TestRun(t *testing.T) {
 			input:       `{not json`,
 			sessionName: "default",
 			projectDir:  "/home/user/project",
-			tool:        agent.Claude,
+			tool:        agent.Codex,
 			wantErr:     true,
 		},
 		{
@@ -286,7 +286,7 @@ func TestRunNoMuxacTmuxSessionIsNoop(t *testing.T) {
 	// no muxac-managed tmux session for its cwd. Its hook events must not create a
 	// phantom session row.
 	r := strings.NewReader(`{"hook_event_name": "UserPromptSubmit"}`)
-	if err := hook.Run(ctx, r, &fakeTmux{hasSession: false}, queries, "claude", "/home/user/project/sub/dir", agent.Claude); err != nil {
+	if err := hook.Run(ctx, r, &fakeTmux{hasSession: false}, queries, "claude", "/home/user/project/sub/dir", agent.Codex); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -413,7 +413,7 @@ func TestRunWithCurrentState(t *testing.T) {
 			}
 
 			r := strings.NewReader(tt.input)
-			if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Claude); err != nil {
+			if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Codex); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
@@ -562,134 +562,6 @@ func TestRunSessionStart_SavesAgentTool_Gemini(t *testing.T) {
 	}
 }
 
-func TestRunSessionStart_SavesSessionID(t *testing.T) {
-	t.Parallel()
-
-	ctx := t.Context()
-	queries := database.SetupTestDB(t)
-
-	// Pre-create session
-	if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-		Name: "default", Path: "/project", Status: "running", UpdatedAt: timestamp.Now(),
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	// SessionStart with session_id
-	r := strings.NewReader(`{"hook_event_name": "SessionStart", "session_id": "abc-123"}`)
-	if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Claude); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Verify session ID was saved
-	sessions, err := queries.ListSessions(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sessions) != 1 {
-		t.Fatalf("expected 1 session, got %d", len(sessions))
-	}
-	if sessions[0].AgentSessionID != "abc-123" {
-		t.Errorf("agent_session_id = %q, want %q", sessions[0].AgentSessionID, "abc-123")
-	}
-}
-
-func TestRunPermissionRequest_SetsWaitingSince(t *testing.T) {
-	t.Parallel()
-
-	ctx := t.Context()
-	queries := database.SetupTestDB(t)
-
-	// Pre-create session as running
-	if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-		Name: "default", Path: "/project", Status: "running", UpdatedAt: timestamp.Now(),
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	before := timestamp.Now()
-	r := strings.NewReader(`{"hook_event_name": "PermissionRequest"}`)
-	if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Claude); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	sessions, err := queries.ListSessions(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sessions) != 1 {
-		t.Fatalf("expected 1 session, got %d", len(sessions))
-	}
-	if sessions[0].WaitingSince == "" {
-		t.Fatal("waiting_since should be set on PermissionRequest")
-	}
-	if sessions[0].WaitingSince < before {
-		t.Errorf("waiting_since = %q, expected >= %q", sessions[0].WaitingSince, before)
-	}
-}
-
-func TestRunUserPromptSubmit_ClearsWaitingSince(t *testing.T) {
-	t.Parallel()
-
-	ctx := t.Context()
-	queries := database.SetupTestDB(t)
-
-	// Pre-create session as waiting with waiting_since set
-	if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-		Name: "default", Path: "/project", Status: "waiting", UpdatedAt: timestamp.Now(), WaitingSince: timestamp.Now(),
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	r := strings.NewReader(`{"hook_event_name": "UserPromptSubmit"}`)
-	if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Claude); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	sessions, err := queries.ListSessions(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sessions) != 1 {
-		t.Fatalf("expected 1 session, got %d", len(sessions))
-	}
-	if sessions[0].WaitingSince != "" {
-		t.Errorf("waiting_since = %q, want empty after UserPromptSubmit", sessions[0].WaitingSince)
-	}
-}
-
-func TestRunSessionStart_SavesAgentTool(t *testing.T) {
-	t.Parallel()
-
-	ctx := t.Context()
-	queries := database.SetupTestDB(t)
-
-	// Pre-create session
-	if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-		Name: "default", Path: "/project", Status: "running", UpdatedAt: timestamp.Now(),
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	// SessionStart with Claude tool
-	r := strings.NewReader(`{"hook_event_name": "SessionStart", "session_id": "abc-123"}`)
-	if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Claude); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Verify agent_tool was saved
-	sessions, err := queries.ListSessions(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sessions) != 1 {
-		t.Fatalf("expected 1 session, got %d", len(sessions))
-	}
-	if sessions[0].AgentTool != "claude" {
-		t.Errorf("agent_tool = %q, want %q", sessions[0].AgentTool, "claude")
-	}
-}
-
 func TestRunSessionStart_NoSessionID(t *testing.T) {
 	t.Parallel()
 
@@ -710,7 +582,7 @@ func TestRunSessionStart_NoSessionID(t *testing.T) {
 
 	// SessionStart without session_id should not overwrite
 	r := strings.NewReader(`{"hook_event_name": "SessionStart"}`)
-	if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Claude); err != nil {
+	if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Codex); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -723,5 +595,114 @@ func TestRunSessionStart_NoSessionID(t *testing.T) {
 	}
 	if sessions[0].AgentSessionID != "existing-id" {
 		t.Errorf("agent_session_id = %q, want %q", sessions[0].AgentSessionID, "existing-id")
+	}
+}
+
+func TestRunIgnoresProgramStatusSession(t *testing.T) {
+	t.Parallel()
+
+	events := []string{
+		`{"hook_event_name": "UserPromptSubmit"}`,
+		`{"hook_event_name": "PreToolUse"}`,
+		`{"hook_event_name": "PermissionRequest"}`,
+		`{"hook_event_name": "Stop"}`,
+		`{"hook_event_name": "SessionStart", "session_id": "sess-1"}`,
+		`{"hook_event_name": "SessionEnd"}`,
+	}
+
+	for _, input := range events {
+		t.Run(input, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := t.Context()
+			queries := database.SetupTestDB(t)
+
+			// The agent reported running through OSC 7501, so `muxac wrap` owns
+			// the session status even though the agent also fires hooks.
+			if err := queries.EnsureSession(ctx, sqlc.EnsureSessionParams{
+				Name: "default", Path: "/home/user/project", Status: "idle", UpdatedAt: timestamp.Now(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := queries.UpdateSessionProgramStatus(ctx, sqlc.UpdateSessionProgramStatusParams{
+				Status: "running", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := hook.Run(ctx, strings.NewReader(input), aliveTmux(), queries, "default", "/home/user/project", agent.Codex); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			rows, err := queries.ListSessions(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != 1 {
+				t.Fatalf("sessions = %d, want 1", len(rows))
+			}
+			if rows[0].Status != "running" {
+				t.Errorf("status = %q, want running (hook events must not override OSC 7501 reports)", rows[0].Status)
+			}
+			if rows[0].AgentTool != "" || rows[0].AgentSessionID != "" {
+				t.Errorf("agent tool/session id = %q/%q, want them untouched", rows[0].AgentTool, rows[0].AgentSessionID)
+			}
+		})
+	}
+}
+
+func TestRunIgnoresClaudeCode(t *testing.T) {
+	t.Parallel()
+
+	events := []string{
+		`{"hook_event_name": "UserPromptSubmit"}`,
+		`{"hook_event_name": "PreToolUse"}`,
+		`{"hook_event_name": "PostToolUse"}`,
+		`{"hook_event_name": "PermissionRequest"}`,
+		`{"hook_event_name": "Notification", "notification_type": "permission_prompt"}`,
+		`{"hook_event_name": "Stop"}`,
+		`{"hook_event_name": "SessionStart", "session_id": "sess-1"}`,
+		`{"hook_event_name": "SessionEnd"}`,
+		`{not json`,
+	}
+
+	for _, input := range events {
+		t.Run(input, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := t.Context()
+
+			// Claude Code's status comes from OSC 7501 only, so its hooks
+			// change nothing, even before its first report arrives...
+			queries := database.SetupTestDB(t)
+			if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+				Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := hook.Run(ctx, strings.NewReader(input), aliveTmux(), queries, "default", "/home/user/project", agent.Claude); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			rows, err := queries.ListSessions(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != 1 || rows[0].Status != "running" || rows[0].AgentTool != "" || rows[0].AgentSessionID != "" {
+				t.Errorf("session = %+v, want it untouched", rows)
+			}
+
+			// ...and create no session either.
+			empty := database.SetupTestDB(t)
+			if err := hook.Run(ctx, strings.NewReader(input), aliveTmux(), empty, "default", "/home/user/project", agent.Claude); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			rows, err = empty.ListSessions(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != 0 {
+				t.Errorf("sessions = %d, want none", len(rows))
+			}
+		})
 	}
 }

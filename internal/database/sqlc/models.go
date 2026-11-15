@@ -25,5 +25,5 @@ type Session struct {
 	AgentTool      string
 	CreatedAt      string
 	UpdatedAt      string
-	WaitingSince   string
+	ProgramStatus  int64
 }

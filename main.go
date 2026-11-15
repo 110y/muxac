@@ -5,6 +5,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -24,8 +25,10 @@ import (
 	"github.com/110y/muxac/internal/monitor"
 	"github.com/110y/muxac/internal/newcmd"
 	"github.com/110y/muxac/internal/remove"
+	"github.com/110y/muxac/internal/status"
 	"github.com/110y/muxac/internal/tmux"
 	"github.com/110y/muxac/internal/version"
+	"github.com/110y/muxac/internal/wrap"
 )
 
 //go:embed db/migrations/*.sql
@@ -33,9 +36,20 @@ var migrationsFS embed.FS
 
 func main() {
 	if err := run(); err != nil {
+		if code, ok := errors.AsType[exitCodeError](err); ok {
+			os.Exit(int(code))
+		}
 		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
 		os.Exit(1)
 	}
+}
+
+// exitCodeError makes main exit with the given status without printing an
+// error, e.g. to pass on the exit status of a command run by `muxac wrap`.
+type exitCodeError int
+
+func (e exitCodeError) Error() string {
+	return fmt.Sprintf("exit status %d", int(e))
 }
 
 func run() error {
@@ -163,7 +177,11 @@ func run() error {
 		if err := monitor.EnsureRunning(ctx, tmuxRunner, queries); err != nil {
 			return err
 		}
-		return newcmd.Run(ctx, tmuxRunner, queries, name, workDir, tmuxConf, command, env)
+		exe, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		return newcmd.Run(ctx, tmuxRunner, queries, exe, name, workDir, tmuxConf, command, env)
 
 	case "attach":
 		name := "default"
@@ -320,6 +338,84 @@ func run() error {
 		}
 		return hook.Run(ctx, bytes.NewReader(stdinBytes), tmuxRunner, queries, sessionName, projectDir, tool)
 
+	case "wrap":
+		name := "default"
+		var dir string
+		var argv []string
+		args := os.Args[2:]
+	parseWrapArgs:
+		for i := 0; i < len(args); i++ {
+			switch args[i] {
+			case "--help", "-h":
+				usageWrap()
+				return nil
+			case "--name":
+				if i+1 >= len(args) {
+					return fmt.Errorf("--name requires an argument")
+				}
+				name = args[i+1]
+				i++
+			case "--dir":
+				if i+1 >= len(args) {
+					return fmt.Errorf("--dir requires an argument")
+				}
+				dir = args[i+1]
+				i++
+			case "--":
+				argv = args[i+1:]
+				break parseWrapArgs
+			default:
+				if strings.HasPrefix(args[i], "-") {
+					return fmt.Errorf("unknown option: %s", args[i])
+				}
+				argv = args[i:]
+				break parseWrapArgs
+			}
+		}
+		if len(argv) == 0 {
+			usageWrap()
+			return fmt.Errorf("wrap requires a command argument")
+		}
+		var workDir string
+		if dir != "" {
+			workDir, err = filepath.Abs(dir)
+			if err != nil {
+				return err
+			}
+		} else {
+			workDir, err = os.Getwd()
+			if err != nil {
+				return err
+			}
+		}
+		// Recording must outlive a SIGINT or SIGTERM, which is forwarded to the
+		// command rather than ending the wrapper.
+		recordCtx := context.WithoutCancel(ctx)
+		if err := wrap.EnsureSession(recordCtx, queries, name, workDir); err != nil {
+			return err
+		}
+		logger := slog.New(dblog.NewHandler(queries, slog.LevelError))
+		code, err := wrap.Run(wrap.Options{
+			Argv:   argv,
+			Stdin:  os.Stdin,
+			Stdout: os.Stdout,
+			OnStatus: func(st status.Status) {
+				if err := wrap.RecordStatus(recordCtx, queries, name, workDir, st); err != nil {
+					logger.ErrorContext(recordCtx, "record program status failed", "error", err)
+				}
+			},
+			OnError: func(err error) {
+				logger.ErrorContext(recordCtx, "wrap relay error", "error", err)
+			},
+		})
+		if err != nil {
+			return err
+		}
+		if code != 0 {
+			return exitCodeError(code)
+		}
+		return nil
+
 	case "monitor":
 		for _, arg := range os.Args[2:] {
 			switch arg {
@@ -411,11 +507,23 @@ Required environment variables:
 
 Tool detection:
   GEMINI_PROJECT_DIR    Set by Gemini CLI hooks (detects Gemini)
-  CLAUDE_PROJECT_DIR    Set by Claude Code hooks (detects Claude)
+  CLAUDE_PROJECT_DIR    Set by Claude Code hooks (detects Claude; its events are ignored)
   cwd field on stdin    Falls back to Codex when no env var matches
 
 Options:
   --help, -h    Show this help message`)
+}
+
+func usageWrap() {
+	fmt.Fprintln(os.Stderr, `Usage: muxac wrap [options] [--] <command> [args...]
+
+Run a command on muxac's own pseudo-terminal and update the session status from
+its OSC 7501 reports. muxac new runs every session's command this way.
+
+Options:
+  --name <name>    Session name (default: "default")
+  --dir <path>     Session directory (default: current directory)
+  --help, -h       Show this help message`)
 }
 
 func usageMonitor() {

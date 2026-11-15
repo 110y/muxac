@@ -32,6 +32,29 @@ func (q *Queries) DeleteSession(ctx context.Context, arg DeleteSessionParams) er
 	return err
 }
 
+const ensureSession = `-- name: EnsureSession :exec
+INSERT INTO sessions (name, path, status, updated_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT (name, path) DO NOTHING
+`
+
+type EnsureSessionParams struct {
+	Name      string
+	Path      string
+	Status    string
+	UpdatedAt string
+}
+
+func (q *Queries) EnsureSession(ctx context.Context, arg EnsureSessionParams) error {
+	_, err := q.db.ExecContext(ctx, ensureSession,
+		arg.Name,
+		arg.Path,
+		arg.Status,
+		arg.UpdatedAt,
+	)
+	return err
+}
+
 const getMonitorHeartbeat = `-- name: GetMonitorHeartbeat :one
 SELECT version, updated_at FROM monitor_heartbeat WHERE id = 1
 `
@@ -46,6 +69,22 @@ func (q *Queries) GetMonitorHeartbeat(ctx context.Context) (GetMonitorHeartbeatR
 	var i GetMonitorHeartbeatRow
 	err := row.Scan(&i.Version, &i.UpdatedAt)
 	return i, err
+}
+
+const getSessionProgramStatus = `-- name: GetSessionProgramStatus :one
+SELECT program_status FROM sessions WHERE name = ? AND path = ?
+`
+
+type GetSessionProgramStatusParams struct {
+	Name string
+	Path string
+}
+
+func (q *Queries) GetSessionProgramStatus(ctx context.Context, arg GetSessionProgramStatusParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, getSessionProgramStatus, arg.Name, arg.Path)
+	var program_status int64
+	err := row.Scan(&program_status)
+	return program_status, err
 }
 
 const getSessionStatus = `-- name: GetSessionStatus :one
@@ -64,6 +103,32 @@ func (q *Queries) GetSessionStatus(ctx context.Context, arg GetSessionStatusPara
 	return status, err
 }
 
+const initSessionStatus = `-- name: InitSessionStatus :exec
+INSERT INTO sessions (name, path, status, updated_at, program_status)
+VALUES (?, ?, ?, ?, 0)
+ON CONFLICT (name, path) DO UPDATE SET
+    status = excluded.status,
+    updated_at = excluded.updated_at,
+    program_status = excluded.program_status
+`
+
+type InitSessionStatusParams struct {
+	Name      string
+	Path      string
+	Status    string
+	UpdatedAt string
+}
+
+func (q *Queries) InitSessionStatus(ctx context.Context, arg InitSessionStatusParams) error {
+	_, err := q.db.ExecContext(ctx, initSessionStatus,
+		arg.Name,
+		arg.Path,
+		arg.Status,
+		arg.UpdatedAt,
+	)
+	return err
+}
+
 const insertDebugLog = `-- name: InsertDebugLog :exec
 INSERT INTO debug_log (level, message, created_at) VALUES (?, ?, ?)
 `
@@ -80,7 +145,7 @@ func (q *Queries) InsertDebugLog(ctx context.Context, arg InsertDebugLogParams) 
 }
 
 const listSessions = `-- name: ListSessions :many
-SELECT name, path, status, agent_session_id, agent_tool, updated_at, waiting_since FROM sessions
+SELECT name, path, status, agent_session_id, agent_tool, updated_at, program_status FROM sessions
 `
 
 type ListSessionsRow struct {
@@ -90,7 +155,7 @@ type ListSessionsRow struct {
 	AgentSessionID string
 	AgentTool      string
 	UpdatedAt      string
-	WaitingSince   string
+	ProgramStatus  int64
 }
 
 func (q *Queries) ListSessions(ctx context.Context) ([]ListSessionsRow, error) {
@@ -109,7 +174,7 @@ func (q *Queries) ListSessions(ctx context.Context) ([]ListSessionsRow, error) {
 			&i.AgentSessionID,
 			&i.AgentTool,
 			&i.UpdatedAt,
-			&i.WaitingSince,
+			&i.ProgramStatus,
 		); err != nil {
 			return nil, err
 		}
@@ -168,25 +233,45 @@ func (q *Queries) UpdateAgentTool(ctx context.Context, arg UpdateAgentToolParams
 	return err
 }
 
+const updateSessionProgramStatus = `-- name: UpdateSessionProgramStatus :exec
+UPDATE sessions SET status = ?, updated_at = ?, program_status = 1
+WHERE name = ? AND path = ?
+`
+
+type UpdateSessionProgramStatusParams struct {
+	Status    string
+	UpdatedAt string
+	Name      string
+	Path      string
+}
+
+func (q *Queries) UpdateSessionProgramStatus(ctx context.Context, arg UpdateSessionProgramStatusParams) error {
+	_, err := q.db.ExecContext(ctx, updateSessionProgramStatus,
+		arg.Status,
+		arg.UpdatedAt,
+		arg.Name,
+		arg.Path,
+	)
+	return err
+}
+
 const updateSessionStatusIfUnchanged = `-- name: UpdateSessionStatusIfUnchanged :exec
-UPDATE sessions SET status = ?, updated_at = ?, waiting_since = ?
+UPDATE sessions SET status = ?, updated_at = ?
 WHERE name = ? AND path = ? AND status = ?
 `
 
 type UpdateSessionStatusIfUnchangedParams struct {
-	Status       string
-	UpdatedAt    string
-	WaitingSince string
-	Name         string
-	Path         string
-	Status_2     string
+	Status    string
+	UpdatedAt string
+	Name      string
+	Path      string
+	Status_2  string
 }
 
 func (q *Queries) UpdateSessionStatusIfUnchanged(ctx context.Context, arg UpdateSessionStatusIfUnchangedParams) error {
 	_, err := q.db.ExecContext(ctx, updateSessionStatusIfUnchanged,
 		arg.Status,
 		arg.UpdatedAt,
-		arg.WaitingSince,
 		arg.Name,
 		arg.Path,
 		arg.Status_2,
@@ -213,20 +298,18 @@ func (q *Queries) UpsertMonitorHeartbeat(ctx context.Context, arg UpsertMonitorH
 }
 
 const upsertSessionStatus = `-- name: UpsertSessionStatus :exec
-INSERT INTO sessions (name, path, status, updated_at, waiting_since)
-VALUES (?, ?, ?, ?, ?)
+INSERT INTO sessions (name, path, status, updated_at)
+VALUES (?, ?, ?, ?)
 ON CONFLICT (name, path) DO UPDATE SET
     status = excluded.status,
-    updated_at = excluded.updated_at,
-    waiting_since = excluded.waiting_since
+    updated_at = excluded.updated_at
 `
 
 type UpsertSessionStatusParams struct {
-	Name         string
-	Path         string
-	Status       string
-	UpdatedAt    string
-	WaitingSince string
+	Name      string
+	Path      string
+	Status    string
+	UpdatedAt string
 }
 
 func (q *Queries) UpsertSessionStatus(ctx context.Context, arg UpsertSessionStatusParams) error {
@@ -235,7 +318,6 @@ func (q *Queries) UpsertSessionStatus(ctx context.Context, arg UpsertSessionStat
 		arg.Path,
 		arg.Status,
 		arg.UpdatedAt,
-		arg.WaitingSince,
 	)
 	return err
 }

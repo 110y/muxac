@@ -22,17 +22,13 @@ func loadMigrations() fs.FS {
 func SetupTestDB(t *testing.T) *sqlc.Queries {
 	t.Helper()
 
-	queries, _ := SetupTestDBWithConn(t)
-	return queries
-}
-
-func SetupTestDBWithConn(t *testing.T) (*sqlc.Queries, *sql.DB) {
-	t.Helper()
-
 	conn, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Every connection to ":memory:" opens a database of its own: tests that
+	// query from several goroutines must share one.
+	conn.SetMaxOpenConns(1)
 	t.Cleanup(func() { conn.Close() })
 
 	if _, err := conn.ExecContext(t.Context(), "PRAGMA foreign_keys = ON"); err != nil {
@@ -43,5 +39,5 @@ func SetupTestDBWithConn(t *testing.T) (*sqlc.Queries, *sql.DB) {
 		t.Fatal(err)
 	}
 
-	return sqlc.New(conn), conn
+	return sqlc.New(conn)
 }

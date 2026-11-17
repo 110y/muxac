@@ -11,12 +11,6 @@ type DebugLog struct {
 	CreatedAt string
 }
 
-type MonitorHeartbeat struct {
-	ID        int64
-	Version   string
-	UpdatedAt string
-}
-
 type Session struct {
 	Name           string
 	Path           string

@@ -8,15 +8,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     -- 1 once the agent has reported its status through the Program Status
     -- Protocol (OSC 7501). Such a session's status is owned by `muxac wrap`,
-    -- so hook events and the monitor's heuristics leave it alone.
+    -- so hook events and the status heuristics of the session's server leave
+    -- it alone.
     program_status     INTEGER NOT NULL DEFAULT 0 CHECK (program_status IN (0, 1)),
     PRIMARY KEY (path, name)
-);
-
-CREATE TABLE IF NOT EXISTS monitor_heartbeat (
-    id         INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
-    version    TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 CREATE TABLE IF NOT EXISTS debug_log (

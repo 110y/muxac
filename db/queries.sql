@@ -14,6 +14,10 @@ SELECT program_status FROM sessions WHERE name = ? AND path = ?;
 -- name: ListSessions :many
 SELECT name, path, status, agent_session_id, agent_tool, updated_at, program_status FROM sessions;
 
+-- name: GetSession :one
+SELECT name, path, status, agent_session_id, agent_tool, updated_at, program_status FROM sessions
+WHERE name = ? AND path = ?;
+
 -- name: InitSessionStatus :exec
 INSERT INTO sessions (name, path, status, updated_at, program_status)
 VALUES (?, ?, ?, ?, 0)
@@ -45,16 +49,6 @@ WHERE name = ? AND path = ?;
 
 -- name: DeleteSession :exec
 DELETE FROM sessions WHERE name = ? AND path = ?;
-
--- name: UpsertMonitorHeartbeat :exec
-INSERT INTO monitor_heartbeat (id, version, updated_at)
-VALUES (1, ?, ?)
-ON CONFLICT (id) DO UPDATE SET
-    version = excluded.version,
-    updated_at = excluded.updated_at;
-
--- name: GetMonitorHeartbeat :one
-SELECT version, updated_at FROM monitor_heartbeat WHERE id = 1;
 
 -- name: InsertDebugLog :exec
 INSERT INTO debug_log (level, message, created_at) VALUES (?, ?, ?);

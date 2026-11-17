@@ -5,6 +5,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -16,11 +17,23 @@ import (
 	"github.com/110y/muxac/internal/database/sqlc"
 )
 
+// busyTimeoutPragma makes the queries of a connection wait, rather than fail,
+// while the database is locked by another process, as every muxac command and
+// the server of every session use it. It takes effect before the next
+// statement of the connection: a connection that ran a statement without it
+// may have failed with SQLITE_BUSY, as when the last connection to the
+// database closes and checkpoints it.
+const busyTimeoutPragma = "PRAGMA busy_timeout = 5000"
+
 // Open opens (or creates) the SQLite database and returns ready-to-use Queries and the underlying connection.
-// cacheDir is the muxac cache directory (e.g. ~/.cache/muxac); the database file is stored at cacheDir/db.
+// cacheDir is the muxac cache directory (e.g. ~/.cache/muxac); the database file is stored at cacheDir/sessions.db.
 // migrations is an fs.FS containing SQL migration files (e.g. from go:embed).
 func Open(ctx context.Context, migrations fs.FS, cacheDir string) (*sqlc.Queries, *sql.DB, error) {
-	dbFile := filepath.Join(cacheDir, "db")
+	// Versions of muxac that ran their sessions in tmux keep their database
+	// in cacheDir/db. A monitor such a version left running in tmux deletes
+	// the row of every session it does not find there, so it must not share
+	// the database of the sessions muxac runs itself.
+	dbFile := filepath.Join(cacheDir, "sessions.db")
 
 	if err := os.MkdirAll(filepath.Dir(dbFile), 0o755); err != nil {
 		return nil, nil, err
@@ -34,10 +47,16 @@ func Open(ctx context.Context, migrations fs.FS, cacheDir string) (*sqlc.Queries
 	if err != nil {
 		return nil, nil, err
 	}
+	// The pragmas below but journal_mode only apply to the connection they
+	// are run on. With a single connection, every query runs with them, even
+	// in the processes that query from several goroutines for long, such as
+	// the server of a session.
+	conn.SetMaxOpenConns(1)
 
 	pragmas := []string{
+		// First, since the others may have to wait as well.
+		busyTimeoutPragma,
 		"PRAGMA journal_mode = WAL",
-		"PRAGMA busy_timeout = 5000",
 		"PRAGMA synchronous = NORMAL",
 		"PRAGMA foreign_keys = ON",
 	}
@@ -68,11 +87,16 @@ func resetIfNeeded(ctx context.Context, dbFile string) error {
 	if err != nil {
 		return err
 	}
+	// The query waits as the ones of Open do: on the same connection as the
+	// pragma.
+	conn.SetMaxOpenConns(1)
 
 	var count int
-	err = conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='_migrations'").Scan(&count)
-	conn.Close()
-	if err != nil {
+	_, err = conn.ExecContext(ctx, busyTimeoutPragma)
+	if err == nil {
+		err = conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='_migrations'").Scan(&count)
+	}
+	if err := errors.Join(err, conn.Close()); err != nil {
 		return err
 	}
 

@@ -4,18 +4,18 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/110y/muxac/internal/mux"
 	"github.com/110y/muxac/internal/pathkey"
-	"github.com/110y/muxac/internal/tmux"
 )
 
-// Run executes the attach command. It attaches to an existing tmux session
+// Run executes the attach command. It attaches to an existing session
 // identified by (name, workDir). Returns an error if the session does not exist.
-func Run(ctx context.Context, tmuxRunner tmux.Runner, name, workDir string) error {
-	sessionName := pathkey.TmuxSessionName(name, workDir)
+func Run(ctx context.Context, runner mux.Runner, name, workDir string) error {
+	sessionName := pathkey.SessionName(name, workDir)
 
-	if !tmuxRunner.HasSession(ctx, sessionName) {
+	if !runner.HasSession(ctx, sessionName) {
 		return fmt.Errorf("session %q does not exist for %s", name, workDir)
 	}
 
-	return tmuxRunner.AttachSession(ctx, sessionName)
+	return runner.AttachSession(ctx, sessionName)
 }

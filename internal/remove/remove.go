@@ -5,21 +5,21 @@ import (
 	"fmt"
 
 	"github.com/110y/muxac/internal/database/sqlc"
+	"github.com/110y/muxac/internal/mux"
 	"github.com/110y/muxac/internal/pathkey"
-	"github.com/110y/muxac/internal/tmux"
 )
 
-// Run executes the remove command. It kills the tmux session identified by
+// Run executes the remove command. It kills the session identified by
 // (name, workDir), then deletes the corresponding row in the sessions table.
-// Returns an error if the session does not exist in tmux.
-func Run(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, name, workDir string) error {
-	sessionName := pathkey.TmuxSessionName(name, workDir)
+// Returns an error if the session does not exist.
+func Run(ctx context.Context, runner mux.Runner, queries *sqlc.Queries, name, workDir string) error {
+	sessionName := pathkey.SessionName(name, workDir)
 
-	if !tmuxRunner.HasSession(ctx, sessionName) {
+	if !runner.HasSession(ctx, sessionName) {
 		return fmt.Errorf("session %q does not exist for %s", name, workDir)
 	}
 
-	if err := tmuxRunner.KillSession(ctx, sessionName); err != nil {
+	if err := runner.KillSession(ctx, sessionName); err != nil {
 		return err
 	}
 

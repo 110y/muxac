@@ -45,7 +45,7 @@ func Test_fromDir(t *testing.T) {
 	}
 }
 
-func TestTmuxSessionName(t *testing.T) {
+func TestSessionName(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -77,9 +77,9 @@ func TestTmuxSessionName(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := TmuxSessionName(tt.sn, tt.dir)
+			got := SessionName(tt.sn, tt.dir)
 			if got != tt.want {
-				t.Errorf("TmuxSessionName(%q, %q) = %q, want %q", tt.sn, tt.dir, got, tt.want)
+				t.Errorf("SessionName(%q, %q) = %q, want %q", tt.sn, tt.dir, got, tt.want)
 			}
 		})
 	}

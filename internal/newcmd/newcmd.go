@@ -7,23 +7,24 @@ import (
 
 	"github.com/110y/muxac/internal/agent"
 	"github.com/110y/muxac/internal/database/sqlc"
+	"github.com/110y/muxac/internal/mux"
 	"github.com/110y/muxac/internal/pathkey"
 	"github.com/110y/muxac/internal/status"
 	"github.com/110y/muxac/internal/timestamp"
-	"github.com/110y/muxac/internal/tmux"
 )
 
-// Run executes the new command. It creates a new tmux session identified by (name, workDir).
-// Returns an error if a session with the same identity already exists.
+// Run executes the new command. It creates a new session identified by
+// (name, workDir), which runs command in workDir, and attaches the terminal
+// to it. Returns an error if a session with the same identity already exists.
 //
-// exe is the path of the muxac executable. The pane runs the command through
-// `muxac wrap`, which puts it on a pseudo-terminal of its own so that muxac can
-// receive the status the agent reports through escape sequences (see package
-// wrap).
-func Run(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, exe, name, workDir, tmuxConf, command string, env []string) error {
-	sessionName := pathkey.TmuxSessionName(name, workDir)
+// exe is the path of the muxac executable. The session runs the command
+// through `muxac wrap`, which puts it on a pseudo-terminal of its own so that
+// muxac can receive the status the agent reports through escape sequences
+// (see package wrap).
+func Run(ctx context.Context, runner mux.Runner, queries *sqlc.Queries, exe, name, workDir, command string, env []string) error {
+	sessionName := pathkey.SessionName(name, workDir)
 
-	if tmuxRunner.HasSession(ctx, sessionName) {
+	if runner.HasSession(ctx, sessionName) {
 		return fmt.Errorf("session %q already exists for %s", name, workDir)
 	}
 
@@ -38,13 +39,13 @@ func Run(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, exe
 
 	env = append(env, agent.EnvSessionName+"="+name)
 
-	return tmuxRunner.NewSession(ctx, sessionName, env, wrapCommand(exe, name, workDir, command), tmuxConf)
+	return runner.NewSession(ctx, sessionName, workDir, env, wrapCommand(exe, name, workDir, command))
 }
 
-// wrapCommand returns the shell command the tmux pane runs: command, stripped of
-// inherited agent session variables, under `muxac wrap`. command itself is left
-// unquoted so the shell still parses it as before (arguments, quoting and
-// VAR=value assignments).
+// wrapCommand returns the shell command the session runs: command, stripped
+// of inherited agent session variables, under `muxac wrap`. command itself is
+// left unquoted so the shell still parses it as before (arguments, quoting
+// and VAR=value assignments).
 func wrapCommand(exe, name, workDir, command string) string {
 	if command == "" {
 		return command
@@ -58,18 +59,18 @@ func wrapCommand(exe, name, workDir, command string) string {
 	}, " ")
 }
 
-// shellQuote quotes s as a single word for the shell tmux runs the pane
+// shellQuote quotes s as a single word for the shell the session runs its
 // command with.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // inheritedAgentSessionEnvVars are variables that Claude Code sets for its own
-// process and passes down to its children. When the muxac tmux server is
-// (re)started from inside a Claude Code session, the server captures these and
-// injects them into every pane it later spawns. A freshly launched Claude Code
-// then sees CLAUDECODE / CLAUDE_CODE_SESSION_ID already set, treats itself as a
-// nested, already-identified session, and stops persisting its transcript to
+// process and passes down to its children. When muxac is run from inside a
+// Claude Code session, the session it creates inherits them from muxac's own
+// environment. A freshly launched Claude Code then sees CLAUDECODE /
+// CLAUDE_CODE_SESSION_ID already set, treats itself as a nested,
+// already-identified session, and stops persisting its transcript to
 // ~/.claude/projects/<dir>/<session-id>.jsonl, so the session cannot be resumed.
 var inheritedAgentSessionEnvVars = []string{
 	"CLAUDE_CODE_SESSION_ID",
@@ -77,9 +78,9 @@ var inheritedAgentSessionEnvVars = []string{
 	"CLAUDE_PROJECT_DIR",
 }
 
-// stripInheritedAgentSessionEnv wraps command so the spawned pane unsets the
-// inherited session-identity variables before exec, letting each pane start as a
-// fresh top-level session. Unsetting them is safe for every agent: Claude Code
+// stripInheritedAgentSessionEnv wraps command so that it runs with the inherited
+// session-identity variables unset, letting each session start as a fresh
+// top-level session. Unsetting them is safe for every agent: Claude Code
 // repopulates the correct values for its own run, and a stale CLAUDE_PROJECT_DIR
 // otherwise makes muxac misdetect Codex/Gemini sessions as Claude.
 func stripInheritedAgentSessionEnv(command string) string {

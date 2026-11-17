@@ -164,7 +164,7 @@ func TestRun(t *testing.T) {
 		}
 	})
 
-	t.Run("all sessions displayed regardless of tmux state", func(t *testing.T) {
+	t.Run("all sessions displayed regardless of whether they run", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
 		queries := database.SetupTestDB(t)

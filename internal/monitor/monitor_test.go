@@ -2,115 +2,46 @@ package monitor
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/110y/muxac/internal/database"
 	"github.com/110y/muxac/internal/database/sqlc"
+	"github.com/110y/muxac/internal/pathkey"
 	"github.com/110y/muxac/internal/timestamp"
 )
 
-type detachedSessionCall struct {
-	Name    string
-	Command string
+// fakeScreen plays the screen of the session the tests sync.
+type fakeScreen struct {
+	output string
 }
 
-type fakeTmux struct {
-	sessions           map[string]bool
-	killedSessions     []string
-	detachedSessions   []detachedSessionCall
-	capturePaneOutputs map[string]string
-	capturePaneErr     error
+func (f *fakeScreen) screen() string {
+	return f.output
 }
 
-func newFakeTmux() *fakeTmux {
-	return &fakeTmux{
-		sessions: make(map[string]bool),
-	}
+// fakeSessions plays the servers of the running sessions.
+type fakeSessions struct {
+	names []string
+	err   error
 }
 
-func (f *fakeTmux) HasSession(_ context.Context, sessionName string) bool {
-	return f.sessions[sessionName]
-}
-
-func (f *fakeTmux) AttachSession(_ context.Context, _ string) error {
-	return nil
-}
-
-func (f *fakeTmux) NewSession(_ context.Context, _ string, _ []string, _ string, _ string) error {
-	return nil
-}
-
-func (f *fakeTmux) ListSessionNames(_ context.Context) ([]string, error) {
-	var names []string
-	for name := range f.sessions {
-		names = append(names, name)
-	}
-	return names, nil
-}
-
-func (f *fakeTmux) KillSession(_ context.Context, sessionName string) error {
-	f.killedSessions = append(f.killedSessions, sessionName)
-	return nil
-}
-
-func (f *fakeTmux) NewDetachedSession(_ context.Context, sessionName string, command string) error {
-	f.detachedSessions = append(f.detachedSessions, detachedSessionCall{
-		Name:    sessionName,
-		Command: command,
-	})
-	return nil
-}
-
-func (f *fakeTmux) CapturePane(_ context.Context, sessionName string) (string, error) {
-	if f.capturePaneErr != nil {
-		return "", f.capturePaneErr
-	}
-	return f.capturePaneOutputs[sessionName], nil
-}
-
-func newMonitorState() *monitorState {
-	return &monitorState{
-		capturePaneClearCount: make(map[string]int),
-		capturePromptSeen:     make(map[string]bool),
-	}
+func (f *fakeSessions) ListSessionNames(context.Context) ([]string, error) {
+	return f.names, f.err
 }
 
 var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 func TestSync(t *testing.T) {
 	t.Parallel()
-
-	t.Run("dead session is deleted", func(t *testing.T) {
-		t.Parallel()
-		ctx := t.Context()
-		ft := newFakeTmux()
-		queries := database.SetupTestDB(t)
-		homeDir := t.TempDir()
-
-		if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
-			Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
-		}); err != nil {
-			t.Fatal(err)
-		}
-
-		if err := sync(ctx, ft, queries, homeDir, newMonitorState()); err != nil {
-			t.Fatal(err)
-		}
-
-		sessions, err := queries.ListSessions(ctx)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if len(sessions) != 0 {
-			t.Errorf("expected dead session to be deleted, got %d sessions", len(sessions))
-		}
-	})
 
 	t.Run("CAS protects against concurrent hook update", func(t *testing.T) {
 		t.Parallel()
@@ -159,57 +90,11 @@ func TestSync(t *testing.T) {
 	})
 }
 
-func TestSync_WritesHeartbeat(t *testing.T) {
-	t.Parallel()
-
-	ctx := t.Context()
-	ft := newFakeTmux()
-	queries := database.SetupTestDB(t)
-	homeDir := t.TempDir()
-
-	if err := sync(ctx, ft, queries, homeDir, newMonitorState()); err != nil {
-		t.Fatal(err)
-	}
-
-	row, err := queries.GetMonitorHeartbeat(ctx)
-	if err != nil {
-		t.Fatalf("expected heartbeat record, got error: %v", err)
-	}
-	if row.UpdatedAt == "" {
-		t.Error("expected non-empty heartbeat timestamp")
-	}
-}
-
-func TestRunCancellation(t *testing.T) {
-	t.Parallel()
-
-	ctx, cancel := context.WithCancel(t.Context())
-	ft := newFakeTmux()
-	queries := database.SetupTestDB(t)
-	homeDir := t.TempDir()
-
-	done := make(chan error, 1)
-	go func() {
-		done <- Run(ctx, ft, queries, homeDir, discardLogger)
-	}()
-
-	cancel()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("expected nil on cancellation, got %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run did not return after context cancellation")
-	}
-}
-
 func TestSyncGemini_NoFileSyncNeeded(t *testing.T) {
 	t.Parallel()
 
 	ctx := t.Context()
-	ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
+	fm := &fakeScreen{}
 	queries := database.SetupTestDB(t)
 	homeDir := t.TempDir()
 
@@ -224,7 +109,7 @@ func TestSyncGemini_NoFileSyncNeeded(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := sync(ctx, ft, queries, homeDir, newMonitorState()); err != nil {
+	if err := syncNamedSession(ctx, queries, homeDir, "default", "/home/user/project", fm.screen, newMonitorState()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -257,7 +142,7 @@ func TestSyncGemini_CancellationDetected(t *testing.T) {
 	t.Parallel()
 
 	ctx := t.Context()
-	ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
+	fm := &fakeScreen{}
 	queries := database.SetupTestDB(t)
 	homeDir := t.TempDir()
 
@@ -282,7 +167,7 @@ func TestSyncGemini_CancellationDetected(t *testing.T) {
 	sessionContent := fmt.Sprintf(`{"messages":[{"type":"gemini","timestamp":"%s","content":"some output"},{"type":"info","timestamp":"%s","content":"Request cancelled."}]}`, oldTime, cancelTime)
 	writeGeminiSession(t, homeDir, "/home/user/project", "abcdefgh-1234", sessionContent)
 
-	if err := sync(ctx, ft, queries, homeDir, newMonitorState()); err != nil {
+	if err := syncNamedSession(ctx, queries, homeDir, "default", "/home/user/project", fm.screen, newMonitorState()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -302,7 +187,7 @@ func TestSyncGemini_NoCancellation_StatusUnchanged(t *testing.T) {
 	t.Parallel()
 
 	ctx := t.Context()
-	ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
+	fm := &fakeScreen{}
 	queries := database.SetupTestDB(t)
 	homeDir := t.TempDir()
 
@@ -326,7 +211,7 @@ func TestSyncGemini_NoCancellation_StatusUnchanged(t *testing.T) {
 	sessionContent := `{"messages":[{"type":"gemini","timestamp":"2025-01-01T00:00:00Z","content":"some output"}]}`
 	writeGeminiSession(t, homeDir, "/home/user/project", "abcdefgh-1234", sessionContent)
 
-	if err := sync(ctx, ft, queries, homeDir, newMonitorState()); err != nil {
+	if err := syncNamedSession(ctx, queries, homeDir, "default", "/home/user/project", fm.screen, newMonitorState()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -346,7 +231,7 @@ func TestSyncGemini_OldCancellation_StatusUnchanged(t *testing.T) {
 	t.Parallel()
 
 	ctx := t.Context()
-	ft := &fakeTmux{sessions: map[string]bool{"muxac-default@home@user@project": true}}
+	fm := &fakeScreen{}
 	queries := database.SetupTestDB(t)
 	homeDir := t.TempDir()
 
@@ -371,7 +256,7 @@ func TestSyncGemini_OldCancellation_StatusUnchanged(t *testing.T) {
 	sessionContent := fmt.Sprintf(`{"messages":[{"type":"info","timestamp":"%s","content":"Request cancelled."}]}`, oldCancelTime)
 	writeGeminiSession(t, homeDir, "/home/user/project", "abcdefgh-1234", sessionContent)
 
-	if err := sync(ctx, ft, queries, homeDir, newMonitorState()); err != nil {
+	if err := syncNamedSession(ctx, queries, homeDir, "default", "/home/user/project", fm.screen, newMonitorState()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -387,13 +272,12 @@ func TestSyncGemini_OldCancellation_StatusUnchanged(t *testing.T) {
 	}
 }
 
-func TestSyncGemini_WaitingToRunningViaCapturePaneWhenPromptDismissed(t *testing.T) {
+func TestSyncGemini_WaitingToRunningViaScreenCaptureWhenPromptDismissed(t *testing.T) {
 	t.Parallel()
 
 	ctx := t.Context()
-	ft := &fakeTmux{
-		sessions:           map[string]bool{"muxac-default@home@user@project": true},
-		capturePaneOutputs: map[string]string{"muxac-default@home@user@project": "Action Required\n? Shell Command  echo hello\nAllow once\nAllow for this session\nNo, suggest changes (esc)\n"},
+	fm := &fakeScreen{
+		output: "Action Required\n? Shell Command  echo hello\nAllow once\nAllow for this session\nNo, suggest changes (esc)\n",
 	}
 	queries := database.SetupTestDB(t)
 	homeDir := t.TempDir()
@@ -417,20 +301,20 @@ func TestSyncGemini_WaitingToRunningViaCapturePaneWhenPromptDismissed(t *testing
 	state := newMonitorState()
 
 	// First sync: prompt is visible, capturePromptSeen is set.
-	if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+	if err := syncNamedSession(ctx, queries, homeDir, "default", "/home/user/project", fm.screen, state); err != nil {
 		t.Fatal(err)
 	}
 
 	// Prompt disappears (user approved).
-	ft.capturePaneOutputs["muxac-default@home@user@project"] = "Processing files...\n"
+	fm.output = "Processing files...\n"
 
 	// Second sync: prompt gone, counter=1 (debounce).
-	if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+	if err := syncNamedSession(ctx, queries, homeDir, "default", "/home/user/project", fm.screen, state); err != nil {
 		t.Fatal(err)
 	}
 
 	// Third sync: prompt still gone, counter=2 → transition to running.
-	if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+	if err := syncNamedSession(ctx, queries, homeDir, "default", "/home/user/project", fm.screen, state); err != nil {
 		t.Fatal(err)
 	}
 
@@ -449,9 +333,8 @@ func TestSyncGemini_WaitingStaysWhenPromptVisible(t *testing.T) {
 	t.Parallel()
 
 	ctx := t.Context()
-	ft := &fakeTmux{
-		sessions:           map[string]bool{"muxac-default@home@user@project": true},
-		capturePaneOutputs: map[string]string{"muxac-default@home@user@project": "Action Required\n? Shell Command  echo hello\nAllow once\nAllow for this session\nNo, suggest changes (esc)\n"},
+	fm := &fakeScreen{
+		output: "Action Required\n? Shell Command  echo hello\nAllow once\nAllow for this session\nNo, suggest changes (esc)\n",
 	}
 	queries := database.SetupTestDB(t)
 	homeDir := t.TempDir()
@@ -476,7 +359,7 @@ func TestSyncGemini_WaitingStaysWhenPromptVisible(t *testing.T) {
 
 	// Multiple syncs with prompt visible should keep status as waiting.
 	for i := range 5 {
-		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+		if err := syncNamedSession(ctx, queries, homeDir, "default", "/home/user/project", fm.screen, state); err != nil {
 			t.Fatalf("sync %d: %v", i, err)
 		}
 	}
@@ -496,9 +379,8 @@ func TestSyncGemini_WaitingDoesNotRevertWhenPromptNeverSeen(t *testing.T) {
 	t.Parallel()
 
 	ctx := t.Context()
-	ft := &fakeTmux{
-		sessions:           map[string]bool{"muxac-default@home@user@project": true},
-		capturePaneOutputs: map[string]string{"muxac-default@home@user@project": "Some random output\n"},
+	fm := &fakeScreen{
+		output: "Some random output\n",
 	}
 	queries := database.SetupTestDB(t)
 	homeDir := t.TempDir()
@@ -523,7 +405,7 @@ func TestSyncGemini_WaitingDoesNotRevertWhenPromptNeverSeen(t *testing.T) {
 
 	// Prompt was never seen, so should not revert even after many syncs.
 	for i := range 5 {
-		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+		if err := syncNamedSession(ctx, queries, homeDir, "default", "/home/user/project", fm.screen, state); err != nil {
 			t.Fatalf("sync %d: %v", i, err)
 		}
 	}
@@ -677,11 +559,8 @@ func TestSyncCodex(t *testing.T) {
 	t.Run("running stays running while esc to interrupt is visible", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
-		ft := &fakeTmux{
-			sessions: map[string]bool{"muxac-default@home@user@project": true},
-			capturePaneOutputs: map[string]string{
-				"muxac-default@home@user@project": "• Working (3s • esc to interrupt)\n",
-			},
+		fm := &fakeScreen{
+			output: "• Working (3s • esc to interrupt)\n",
 		}
 		queries := database.SetupTestDB(t)
 		homeDir := t.TempDir()
@@ -699,7 +578,7 @@ func TestSyncCodex(t *testing.T) {
 
 		state := newMonitorState()
 		for range 5 {
-			if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+			if err := syncNamedSession(ctx, queries, homeDir, "default", "/home/user/project", fm.screen, state); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -716,11 +595,8 @@ func TestSyncCodex(t *testing.T) {
 	t.Run("waiting stays waiting while permission prompt is visible", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
-		ft := &fakeTmux{
-			sessions: map[string]bool{"muxac-default@home@user@project": true},
-			capturePaneOutputs: map[string]string{
-				"muxac-default@home@user@project": "Would you like to run the following command?\n  ls\n  Allow once   Deny\n",
-			},
+		fm := &fakeScreen{
+			output: "Would you like to run the following command?\n  ls\n  Allow once   Deny\n",
 		}
 		queries := database.SetupTestDB(t)
 		homeDir := t.TempDir()
@@ -738,7 +614,7 @@ func TestSyncCodex(t *testing.T) {
 
 		state := newMonitorState()
 		for range 5 {
-			if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+			if err := syncNamedSession(ctx, queries, homeDir, "default", "/home/user/project", fm.screen, state); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -755,11 +631,8 @@ func TestSyncCodex(t *testing.T) {
 	t.Run("running transitions to idle after two clear ticks", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
-		ft := &fakeTmux{
-			sessions: map[string]bool{"muxac-default@home@user@project": true},
-			capturePaneOutputs: map[string]string{
-				"muxac-default@home@user@project": "Interrupted by user\n› Ask Codex to do anything\n",
-			},
+		fm := &fakeScreen{
+			output: "Interrupted by user\n› Ask Codex to do anything\n",
 		}
 		queries := database.SetupTestDB(t)
 		homeDir := t.TempDir()
@@ -777,7 +650,7 @@ func TestSyncCodex(t *testing.T) {
 
 		state := newMonitorState()
 
-		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+		if err := syncNamedSession(ctx, queries, homeDir, "default", "/home/user/project", fm.screen, state); err != nil {
 			t.Fatal(err)
 		}
 		got, err := queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
@@ -788,7 +661,7 @@ func TestSyncCodex(t *testing.T) {
 			t.Fatalf("after 1st sync: got %q, want running (debounce)", got)
 		}
 
-		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+		if err := syncNamedSession(ctx, queries, homeDir, "default", "/home/user/project", fm.screen, state); err != nil {
 			t.Fatal(err)
 		}
 		got, err = queries.GetSessionStatus(ctx, sqlc.GetSessionStatusParams{Name: "default", Path: "/home/user/project"})
@@ -803,11 +676,8 @@ func TestSyncCodex(t *testing.T) {
 	t.Run("waiting transitions to idle after Ctrl+C dismisses permission prompt", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
-		ft := &fakeTmux{
-			sessions: map[string]bool{"muxac-default@home@user@project": true},
-			capturePaneOutputs: map[string]string{
-				"muxac-default@home@user@project": "› Ask Codex to do anything\n",
-			},
+		fm := &fakeScreen{
+			output: "› Ask Codex to do anything\n",
 		}
 		queries := database.SetupTestDB(t)
 		homeDir := t.TempDir()
@@ -824,10 +694,10 @@ func TestSyncCodex(t *testing.T) {
 		}
 
 		state := newMonitorState()
-		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+		if err := syncNamedSession(ctx, queries, homeDir, "default", "/home/user/project", fm.screen, state); err != nil {
 			t.Fatal(err)
 		}
-		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+		if err := syncNamedSession(ctx, queries, homeDir, "default", "/home/user/project", fm.screen, state); err != nil {
 			t.Fatal(err)
 		}
 
@@ -843,11 +713,8 @@ func TestSyncCodex(t *testing.T) {
 	t.Run("idle status is a no-op", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
-		ft := &fakeTmux{
-			sessions: map[string]bool{"muxac-default@home@user@project": true},
-			capturePaneOutputs: map[string]string{
-				"muxac-default@home@user@project": "› Ask Codex to do anything\n",
-			},
+		fm := &fakeScreen{
+			output: "› Ask Codex to do anything\n",
 		}
 		queries := database.SetupTestDB(t)
 		homeDir := t.TempDir()
@@ -865,7 +732,7 @@ func TestSyncCodex(t *testing.T) {
 
 		state := newMonitorState()
 		for range 5 {
-			if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+			if err := syncNamedSession(ctx, queries, homeDir, "default", "/home/user/project", fm.screen, state); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -882,11 +749,8 @@ func TestSyncCodex(t *testing.T) {
 	t.Run("counter resets when activity reappears mid-debounce", func(t *testing.T) {
 		t.Parallel()
 		ctx := t.Context()
-		ft := &fakeTmux{
-			sessions: map[string]bool{"muxac-default@home@user@project": true},
-			capturePaneOutputs: map[string]string{
-				"muxac-default@home@user@project": "› Ask Codex to do anything\n",
-			},
+		fm := &fakeScreen{
+			output: "› Ask Codex to do anything\n",
 		}
 		queries := database.SetupTestDB(t)
 		homeDir := t.TempDir()
@@ -904,17 +768,17 @@ func TestSyncCodex(t *testing.T) {
 
 		state := newMonitorState()
 
-		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+		if err := syncNamedSession(ctx, queries, homeDir, "default", "/home/user/project", fm.screen, state); err != nil {
 			t.Fatal(err)
 		}
 
-		ft.capturePaneOutputs["muxac-default@home@user@project"] = "• Working (1s • esc to interrupt)\n"
-		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+		fm.output = "• Working (1s • esc to interrupt)\n"
+		if err := syncNamedSession(ctx, queries, homeDir, "default", "/home/user/project", fm.screen, state); err != nil {
 			t.Fatal(err)
 		}
 
-		ft.capturePaneOutputs["muxac-default@home@user@project"] = "› Ask Codex to do anything\n"
-		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+		fm.output = "› Ask Codex to do anything\n"
+		if err := syncNamedSession(ctx, queries, homeDir, "default", "/home/user/project", fm.screen, state); err != nil {
 			t.Fatal(err)
 		}
 
@@ -932,13 +796,10 @@ func TestSync_ProgramStatusSessionIsLeftAlone(t *testing.T) {
 	t.Parallel()
 
 	ctx := t.Context()
-	ft := &fakeTmux{
-		sessions: map[string]bool{"muxac-default@home@user@project": true},
+	fm := &fakeScreen{
 		// A screen the Codex heuristic reads as an interrupted turn, which
 		// moves a running session to idle after two ticks.
-		capturePaneOutputs: map[string]string{
-			"muxac-default@home@user@project": "Interrupted by user\n› Ask Codex to do anything\n",
-		},
+		output: "Interrupted by user\n› Ask Codex to do anything\n",
 	}
 	queries := database.SetupTestDB(t)
 	homeDir := t.TempDir()
@@ -962,7 +823,7 @@ func TestSync_ProgramStatusSessionIsLeftAlone(t *testing.T) {
 
 	state := newMonitorState()
 	for range 3 {
-		if err := sync(ctx, ft, queries, homeDir, state); err != nil {
+		if err := syncNamedSession(ctx, queries, homeDir, "default", "/home/user/project", fm.screen, state); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -976,7 +837,7 @@ func TestSync_ProgramStatusSessionIsLeftAlone(t *testing.T) {
 	if got != "running" {
 		t.Errorf("status = %q, want running (left to the agent's OSC 7501 reports)", got)
 	}
-	if n := state.capturePaneClearCount["default:/home/user/project"]; n != 0 {
+	if n := state.captureClearCount["default:/home/user/project"]; n != 0 {
 		t.Errorf("debounce counter = %d, want none kept for a program status session", n)
 	}
 }
@@ -985,11 +846,8 @@ func TestSync_ClaudeSessionIsLeftAlone(t *testing.T) {
 	t.Parallel()
 
 	ctx := t.Context()
-	ft := &fakeTmux{
-		sessions: map[string]bool{"muxac-default@home@user@project": true},
-		capturePaneOutputs: map[string]string{
-			"muxac-default@home@user@project": "Do you want to proceed?\n❯ 1. Yes\n  2. No\n\nEsc to cancel",
-		},
+	fm := &fakeScreen{
+		output: "Do you want to proceed?\n❯ 1. Yes\n  2. No\n\nEsc to cancel",
 	}
 	queries := database.SetupTestDB(t)
 
@@ -1008,7 +866,7 @@ func TestSync_ClaudeSessionIsLeftAlone(t *testing.T) {
 
 	state := newMonitorState()
 	for range 3 {
-		if err := sync(ctx, ft, queries, t.TempDir(), state); err != nil {
+		if err := syncNamedSession(ctx, queries, t.TempDir(), "default", "/home/user/project", fm.screen, state); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1024,33 +882,159 @@ func TestSync_ClaudeSessionIsLeftAlone(t *testing.T) {
 	}
 }
 
-func TestSync_DeadProgramStatusSessionIsDeleted(t *testing.T) {
+func TestSyncNamedSession_MakesMissingRowAgain(t *testing.T) {
 	t.Parallel()
 
 	ctx := t.Context()
-	ft := newFakeTmux()
 	queries := database.SetupTestDB(t)
 
-	if err := queries.EnsureSession(ctx, sqlc.EnsureSessionParams{
-		Name: "default", Path: "/home/user/project", Status: "idle", UpdatedAt: timestamp.Now(),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := queries.UpdateSessionProgramStatus(ctx, sqlc.UpdateSessionProgramStatusParams{
-		Status: "running", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
-	}); err != nil {
+	// The session runs, but its row is gone, as when Prune ran while the
+	// session was starting.
+	if err := syncNamedSession(ctx, queries, t.TempDir(), "default", "/home/user/project", (&fakeScreen{}).screen, newMonitorState()); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := sync(ctx, ft, queries, t.TempDir(), newMonitorState()); err != nil {
-		t.Fatal(err)
-	}
-
-	sessions, err := queries.ListSessions(ctx)
+	got, err := queries.GetSession(ctx, sqlc.GetSessionParams{Name: "default", Path: "/home/user/project"})
 	if err != nil {
+		t.Fatalf("the row was not made again: %v", err)
+	}
+	if got.Status != "idle" || got.ProgramStatus != 0 {
+		t.Errorf("the row was made again as %+v, want an idle one", got)
+	}
+}
+
+// waitFor waits for cond to hold, failing the test if it does not in time.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestWatch(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	queries := database.SetupTestDB(t)
+	homeDir := t.TempDir()
+	params := sqlc.GetSessionParams{Name: "default", Path: "/home/user/project"}
+
+	if err := queries.UpsertSessionStatus(ctx, sqlc.UpsertSessionStatusParams{
+		Name: "default", Path: "/home/user/project", Status: "running", UpdatedAt: timestamp.Now(),
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(sessions) != 0 {
-		t.Errorf("expected the session without a tmux session to be deleted, got %d sessions", len(sessions))
+	if err := queries.UpdateAgentTool(ctx, sqlc.UpdateAgentToolParams{
+		AgentTool: "codex", UpdatedAt: timestamp.Now(), Name: "default", Path: "/home/user/project",
+	}); err != nil {
+		t.Fatal(err)
 	}
+	// Codex was interrupted: its screen no longer shows it busy.
+	fm := &fakeScreen{output: "Interrupted by user\n› Ask Codex to do anything\n"}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		Watch(ctx, queries, homeDir, "default", "/home/user/project", fm.screen, discardLogger)
+	}()
+
+	waitFor(t, "the status of the session to be brought up to date", func() bool {
+		got, err := queries.GetSession(ctx, params)
+		return err == nil && got.Status == "idle"
+	})
+
+	if err := queries.DeleteSession(ctx, sqlc.DeleteSessionParams{Name: "default", Path: "/home/user/project"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the row of the running session to be made again", func() bool {
+		_, err := queries.GetSession(ctx, params)
+		return err == nil
+	})
+
+	// The session ends.
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Watch did not return once the session ended")
+	}
+	if _, err := queries.GetSession(t.Context(), params); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("GetSession once the session ended: %v, want the row deleted", err)
+	}
+}
+
+func TestPrune(t *testing.T) {
+	t.Parallel()
+
+	// setup makes the rows of the sessions named so in /home/user/project:
+	// "running" runs, "ended" and "reporting", whose agent reported its
+	// status through OSC 7501, no longer do.
+	setup := func(t *testing.T) *sqlc.Queries {
+		t.Helper()
+
+		ctx := t.Context()
+		queries := database.SetupTestDB(t)
+		for _, name := range []string{"running", "ended", "reporting"} {
+			if err := queries.EnsureSession(ctx, sqlc.EnsureSessionParams{
+				Name: name, Path: "/home/user/project", Status: "idle", UpdatedAt: timestamp.Now(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := queries.UpdateSessionProgramStatus(ctx, sqlc.UpdateSessionProgramStatusParams{
+			Status: "running", UpdatedAt: timestamp.Now(), Name: "reporting", Path: "/home/user/project",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return queries
+	}
+	names := func(t *testing.T, queries *sqlc.Queries) []string {
+		t.Helper()
+
+		rows, err := queries.ListSessions(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, row := range rows {
+			names = append(names, row.Name)
+		}
+		slices.Sort(names)
+		return names
+	}
+
+	t.Run("rows of sessions that no longer run are deleted", func(t *testing.T) {
+		t.Parallel()
+
+		queries := setup(t)
+		sessions := &fakeSessions{names: []string{
+			pathkey.SessionName("running", "/home/user/project"),
+			pathkey.SessionName("ended", "/home/user/other"),
+		}}
+		if err := Prune(t.Context(), sessions, queries); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := names(t, queries), []string{"running"}; !slices.Equal(got, want) {
+			t.Errorf("rows left = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("nothing is deleted if a server does not answer", func(t *testing.T) {
+		t.Parallel()
+
+		queries := setup(t)
+		sessions := &fakeSessions{err: errors.New("ask the session: i/o timeout")}
+		if err := Prune(t.Context(), sessions, queries); err == nil {
+			t.Error("Prune succeeded although a server did not answer")
+		}
+		if got, want := names(t, queries), []string{"ended", "reporting", "running"}; !slices.Equal(got, want) {
+			t.Errorf("rows left = %q, want %q", got, want)
+		}
+	})
 }

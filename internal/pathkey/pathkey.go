@@ -9,7 +9,7 @@ func fromDir(dir string) string {
 	return s
 }
 
-// TmuxSessionName returns the tmux session name for a given name and directory.
-func TmuxSessionName(name, dir string) string {
+// SessionName returns the name of the multiplexer session for a given name and directory.
+func SessionName(name, dir string) string {
 	return "muxac-" + name + fromDir(dir)
 }

@@ -1,4 +1,5 @@
-package wrap
+// Package pty opens pseudo-terminals and changes their size.
+package pty
 
 import (
 	"errors"
@@ -9,10 +10,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// openPTYAttempts is how many times openPTY tries to get a consistent pair.
-const openPTYAttempts = 3
+// openAttempts is how many times Open tries to get a consistent pair.
+const openAttempts = 3
 
-// openPTY opens a new pseudo-terminal and returns its primary and secondary
+// Open opens a new pseudo-terminal and returns its primary and secondary
 // sides.
 //
 // creack/pty v1.1.20 to v1.1.24 can return the wrong secondary side on Linux:
@@ -22,8 +23,8 @@ const openPTYAttempts = 3
 // released yet). The number is therefore read again with x/sys/unix, and the
 // pair is opened anew when the two disagree, so the command is never attached
 // to someone else's terminal.
-func openPTY() (*os.File, *os.File, error) {
-	for range openPTYAttempts {
+func Open() (*os.File, *os.File, error) {
+	for range openAttempts {
 		ptmx, tty, err := pty.Open()
 		if err != nil {
 			return nil, nil, err

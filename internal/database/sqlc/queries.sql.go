@@ -55,19 +55,38 @@ func (q *Queries) EnsureSession(ctx context.Context, arg EnsureSessionParams) er
 	return err
 }
 
-const getMonitorHeartbeat = `-- name: GetMonitorHeartbeat :one
-SELECT version, updated_at FROM monitor_heartbeat WHERE id = 1
+const getSession = `-- name: GetSession :one
+SELECT name, path, status, agent_session_id, agent_tool, updated_at, program_status FROM sessions
+WHERE name = ? AND path = ?
 `
 
-type GetMonitorHeartbeatRow struct {
-	Version   string
-	UpdatedAt string
+type GetSessionParams struct {
+	Name string
+	Path string
 }
 
-func (q *Queries) GetMonitorHeartbeat(ctx context.Context) (GetMonitorHeartbeatRow, error) {
-	row := q.db.QueryRowContext(ctx, getMonitorHeartbeat)
-	var i GetMonitorHeartbeatRow
-	err := row.Scan(&i.Version, &i.UpdatedAt)
+type GetSessionRow struct {
+	Name           string
+	Path           string
+	Status         string
+	AgentSessionID string
+	AgentTool      string
+	UpdatedAt      string
+	ProgramStatus  int64
+}
+
+func (q *Queries) GetSession(ctx context.Context, arg GetSessionParams) (GetSessionRow, error) {
+	row := q.db.QueryRowContext(ctx, getSession, arg.Name, arg.Path)
+	var i GetSessionRow
+	err := row.Scan(
+		&i.Name,
+		&i.Path,
+		&i.Status,
+		&i.AgentSessionID,
+		&i.AgentTool,
+		&i.UpdatedAt,
+		&i.ProgramStatus,
+	)
 	return i, err
 }
 
@@ -276,24 +295,6 @@ func (q *Queries) UpdateSessionStatusIfUnchanged(ctx context.Context, arg Update
 		arg.Path,
 		arg.Status_2,
 	)
-	return err
-}
-
-const upsertMonitorHeartbeat = `-- name: UpsertMonitorHeartbeat :exec
-INSERT INTO monitor_heartbeat (id, version, updated_at)
-VALUES (1, ?, ?)
-ON CONFLICT (id) DO UPDATE SET
-    version = excluded.version,
-    updated_at = excluded.updated_at
-`
-
-type UpsertMonitorHeartbeatParams struct {
-	Version   string
-	UpdatedAt string
-}
-
-func (q *Queries) UpsertMonitorHeartbeat(ctx context.Context, arg UpsertMonitorHeartbeatParams) error {
-	_, err := q.db.ExecContext(ctx, upsertMonitorHeartbeat, arg.Version, arg.UpdatedAt)
 	return err
 }
 

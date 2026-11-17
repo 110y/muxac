@@ -22,8 +22,8 @@ func EnsureSession(ctx context.Context, queries *sqlc.Queries, name, path string
 
 // RecordStatus records st, reported by the wrapped command, as the status of
 // the session identified by name and path. It also marks the session as driven
-// by program status reports, so that hook events and the monitor's heuristics
-// leave it alone from then on.
+// by program status reports, so that hook events and the status heuristics of
+// the session's server leave it alone from then on.
 func RecordStatus(ctx context.Context, queries *sqlc.Queries, name, path string, st status.Status) error {
 	return queries.UpdateSessionProgramStatus(ctx, sqlc.UpdateSessionProgramStatusParams{
 		Status:    string(st),

@@ -9,30 +9,28 @@ import (
 	"github.com/110y/muxac/internal/database"
 	"github.com/110y/muxac/internal/database/sqlc"
 	"github.com/110y/muxac/internal/hook"
+	"github.com/110y/muxac/internal/mux"
 	"github.com/110y/muxac/internal/timestamp"
-	"github.com/110y/muxac/internal/tmux"
 )
 
-// fakeTmux is a tmux.Runner whose HasSession result is configurable.
-type fakeTmux struct {
+// fakeMux is a mux.Runner whose HasSession result is configurable.
+type fakeMux struct {
 	hasSession bool
 }
 
-var _ tmux.Runner = (*fakeTmux)(nil)
+var _ mux.Runner = (*fakeMux)(nil)
 
-func (f *fakeTmux) HasSession(_ context.Context, _ string) bool     { return f.hasSession }
-func (f *fakeTmux) AttachSession(_ context.Context, _ string) error { return nil }
-func (f *fakeTmux) NewSession(_ context.Context, _ string, _ []string, _, _ string) error {
+func (f *fakeMux) HasSession(_ context.Context, _ string) bool     { return f.hasSession }
+func (f *fakeMux) AttachSession(_ context.Context, _ string) error { return nil }
+func (f *fakeMux) NewSession(_ context.Context, _, _ string, _ []string, _ string) error {
 	return nil
 }
-func (f *fakeTmux) ListSessionNames(_ context.Context) ([]string, error)    { return nil, nil }
-func (f *fakeTmux) KillSession(_ context.Context, _ string) error           { return nil }
-func (f *fakeTmux) NewDetachedSession(_ context.Context, _, _ string) error { return nil }
-func (f *fakeTmux) CapturePane(_ context.Context, _ string) (string, error) { return "", nil }
+func (f *fakeMux) ListSessionNames(_ context.Context) ([]string, error) { return nil, nil }
+func (f *fakeMux) KillSession(_ context.Context, _ string) error        { return nil }
 
-// aliveTmux returns a fakeTmux that reports every session as alive, matching the
-// normal case where a hook fires from within its own muxac-managed tmux session.
-func aliveTmux() *fakeTmux { return &fakeTmux{hasSession: true} }
+// aliveMux returns a fakeMux that reports every session as alive, matching the
+// normal case where a hook fires from within its own muxac-managed session.
+func aliveMux() *fakeMux { return &fakeMux{hasSession: true} }
 
 func TestRun(t *testing.T) {
 	t.Parallel()
@@ -240,7 +238,7 @@ func TestRun(t *testing.T) {
 			queries := database.SetupTestDB(t)
 			r := strings.NewReader(tt.input)
 
-			err := hook.Run(ctx, r, aliveTmux(), queries, tt.sessionName, tt.projectDir, tt.tool)
+			err := hook.Run(ctx, r, aliveMux(), queries, tt.sessionName, tt.projectDir, tt.tool)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -276,17 +274,17 @@ func TestRun(t *testing.T) {
 	}
 }
 
-func TestRunNoMuxacTmuxSessionIsNoop(t *testing.T) {
+func TestRunNoMuxacSessionIsNoop(t *testing.T) {
 	t.Parallel()
 
 	ctx := t.Context()
 	queries := database.SetupTestDB(t)
 
 	// A nested agent launched in a subdirectory inherits MUXAC_SESSION_NAME but has
-	// no muxac-managed tmux session for its cwd. Its hook events must not create a
+	// no muxac-managed session for its cwd. Its hook events must not create a
 	// phantom session row.
 	r := strings.NewReader(`{"hook_event_name": "UserPromptSubmit"}`)
-	if err := hook.Run(ctx, r, &fakeTmux{hasSession: false}, queries, "claude", "/home/user/project/sub/dir", agent.Codex); err != nil {
+	if err := hook.Run(ctx, r, &fakeMux{hasSession: false}, queries, "claude", "/home/user/project/sub/dir", agent.Codex); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -295,7 +293,7 @@ func TestRunNoMuxacTmuxSessionIsNoop(t *testing.T) {
 		t.Fatalf("unexpected error listing sessions: %v", err)
 	}
 	if len(rows) != 0 {
-		t.Errorf("expected no sessions when no muxac tmux session exists, got %d", len(rows))
+		t.Errorf("expected no sessions when no muxac session exists, got %d", len(rows))
 	}
 }
 
@@ -413,7 +411,7 @@ func TestRunWithCurrentState(t *testing.T) {
 			}
 
 			r := strings.NewReader(tt.input)
-			if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Codex); err != nil {
+			if err := hook.Run(ctx, r, aliveMux(), queries, "default", "/project", agent.Codex); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
@@ -484,7 +482,7 @@ func TestRunWithCurrentState_Gemini(t *testing.T) {
 			}
 
 			r := strings.NewReader(tt.input)
-			if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Gemini); err != nil {
+			if err := hook.Run(ctx, r, aliveMux(), queries, "default", "/project", agent.Gemini); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
@@ -514,7 +512,7 @@ func TestRunSessionStart_SavesAgentTool_Codex(t *testing.T) {
 	}
 
 	r := strings.NewReader(`{"hook_event_name": "SessionStart", "session_id": "codex-789", "cwd": "/project"}`)
-	if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Codex); err != nil {
+	if err := hook.Run(ctx, r, aliveMux(), queries, "default", "/project", agent.Codex); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -546,7 +544,7 @@ func TestRunSessionStart_SavesAgentTool_Gemini(t *testing.T) {
 	}
 
 	r := strings.NewReader(`{"hook_event_name": "SessionStart", "session_id": "gem-456"}`)
-	if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Gemini); err != nil {
+	if err := hook.Run(ctx, r, aliveMux(), queries, "default", "/project", agent.Gemini); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -582,7 +580,7 @@ func TestRunSessionStart_NoSessionID(t *testing.T) {
 
 	// SessionStart without session_id should not overwrite
 	r := strings.NewReader(`{"hook_event_name": "SessionStart"}`)
-	if err := hook.Run(ctx, r, aliveTmux(), queries, "default", "/project", agent.Codex); err != nil {
+	if err := hook.Run(ctx, r, aliveMux(), queries, "default", "/project", agent.Codex); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -630,7 +628,7 @@ func TestRunIgnoresProgramStatusSession(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if err := hook.Run(ctx, strings.NewReader(input), aliveTmux(), queries, "default", "/home/user/project", agent.Codex); err != nil {
+			if err := hook.Run(ctx, strings.NewReader(input), aliveMux(), queries, "default", "/home/user/project", agent.Codex); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
@@ -680,7 +678,7 @@ func TestRunIgnoresClaudeCode(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			if err := hook.Run(ctx, strings.NewReader(input), aliveTmux(), queries, "default", "/home/user/project", agent.Claude); err != nil {
+			if err := hook.Run(ctx, strings.NewReader(input), aliveMux(), queries, "default", "/home/user/project", agent.Claude); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			rows, err := queries.ListSessions(ctx)
@@ -693,7 +691,7 @@ func TestRunIgnoresClaudeCode(t *testing.T) {
 
 			// ...and create no session either.
 			empty := database.SetupTestDB(t)
-			if err := hook.Run(ctx, strings.NewReader(input), aliveTmux(), empty, "default", "/home/user/project", agent.Claude); err != nil {
+			if err := hook.Run(ctx, strings.NewReader(input), aliveMux(), empty, "default", "/home/user/project", agent.Claude); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			rows, err = empty.ListSessions(ctx)

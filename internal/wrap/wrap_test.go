@@ -112,7 +112,7 @@ func reportingAgent() int {
 	return 3
 }
 
-// fakeTerminal plays the terminal (tmux) on the other side of Run: it collects
+// fakeTerminal plays the terminal of the session on the other side of Run: it collects
 // Run's output and answers DA1 requests.
 type fakeTerminal struct {
 	stdinR, stdinW   *os.File

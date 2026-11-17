@@ -1,7 +1,12 @@
+// Package monitor keeps the rows of the sessions in the database: the server
+// of every session watches its session with Watch for as long as it runs, and
+// Prune deletes the rows of the sessions whose servers went away without doing
+// so.
 package monitor
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,7 +22,6 @@ import (
 	"github.com/110y/muxac/internal/pathkey"
 	"github.com/110y/muxac/internal/status"
 	"github.com/110y/muxac/internal/timestamp"
-	"github.com/110y/muxac/internal/tmux"
 )
 
 // isAfter parses two timestamp strings and returns true if a is strictly after b.
@@ -43,97 +47,147 @@ func parseTimestamp(s string) (time.Time, error) {
 }
 
 type monitorState struct {
-	capturePaneClearCount map[string]int
-	capturePromptSeen     map[string]bool
+	captureClearCount map[string]int
+	capturePromptSeen map[string]bool
+}
+
+func newMonitorState() *monitorState {
+	return &monitorState{
+		captureClearCount: make(map[string]int),
+		capturePromptSeen: make(map[string]bool),
+	}
 }
 
 // forget drops every debounce counter kept for the session identified by key.
 func (s *monitorState) forget(key string) {
-	delete(s.capturePaneClearCount, key)
+	delete(s.captureClearCount, key)
 	delete(s.capturePromptSeen, key)
 }
 
-// Run starts a monitoring loop that syncs session statuses between tmux and the database.
-// It runs an initial sync immediately, then repeats every second.
-// Returns nil on context cancellation.
-func Run(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, homeDir string, logger *slog.Logger) error {
-	state := &monitorState{
-		capturePaneClearCount: make(map[string]int),
-		capturePromptSeen:     make(map[string]bool),
-	}
+const (
+	// syncInterval is how often Watch brings the status of its session up
+	// to date.
+	syncInterval = time.Second
+	// debugLogRetention is how long debug log entries are kept, and
+	// debugLogCleanupInterval how often Watch deletes the older ones.
+	debugLogRetention       = 7 * 24 * time.Hour
+	debugLogCleanupInterval = time.Hour
+	// deleteTimeout bounds how long deleting the row of an ended session may
+	// take.
+	deleteTimeout = 5 * time.Second
+)
 
-	if err := sync(ctx, tmuxRunner, queries, homeDir, state); err != nil {
-		logger.ErrorContext(ctx, "sync failed", "error", err)
-	}
+// Watch keeps the row of the session (name, path) in the database as long as
+// ctx is not done, which it is once the session ends, and deletes the row
+// then. Every second, it brings the status of the session up to date for the
+// agents that do not report it themselves, from what screen returns, which is
+// what the session's screen shows, and from the session files of Gemini CLI.
+// It also deletes the debug log entries older than a week. Errors are logged
+// with logger.
+//
+// It is what the server of every session runs, so that the session has a row
+// as long as it runs, and no longer.
+func Watch(ctx context.Context, queries *sqlc.Queries, homeDir, name, path string, screen func() string, logger *slog.Logger) {
+	state := newMonitorState()
+	deleteOldDebugLog(ctx, queries, logger)
+	cleaned := time.Now()
 
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(syncInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			// Deleting the row outlives ctx, which is done by now.
+			deleteCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deleteTimeout)
+			if err := queries.DeleteSession(deleteCtx, sqlc.DeleteSessionParams{Name: name, Path: path}); err != nil {
+				logger.ErrorContext(deleteCtx, "delete the row of the ended session failed", "error", err)
+			}
+			cancel()
+			return
 		case <-ticker.C:
-			if err := sync(ctx, tmuxRunner, queries, homeDir, state); err != nil {
+			// Failures caused by the session ending are not worth telling.
+			if err := syncNamedSession(ctx, queries, homeDir, name, path, screen, state); err != nil && ctx.Err() == nil {
 				logger.ErrorContext(ctx, "sync failed", "error", err)
+			}
+			if time.Since(cleaned) >= debugLogCleanupInterval {
+				deleteOldDebugLog(ctx, queries, logger)
+				cleaned = time.Now()
 			}
 		}
 	}
 }
 
-func sync(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, homeDir string, state *monitorState) error {
-	var errs []error
-
-	threshold := time.Now().Add(-7 * 24 * time.Hour).UTC().Format(timestamp.Format)
-	if err := queries.DeleteOldDebugLog(ctx, threshold); err != nil {
-		errs = append(errs, fmt.Errorf("delete old debug log: %w", err))
+func deleteOldDebugLog(ctx context.Context, queries *sqlc.Queries, logger *slog.Logger) {
+	threshold := time.Now().Add(-debugLogRetention).UTC().Format(timestamp.Format)
+	if err := queries.DeleteOldDebugLog(ctx, threshold); err != nil && ctx.Err() == nil {
+		logger.ErrorContext(ctx, "delete old debug log failed", "error", err)
 	}
+}
 
-	if err := queries.UpsertMonitorHeartbeat(ctx, sqlc.UpsertMonitorHeartbeatParams{
-		Version:   monitorBuildID,
-		UpdatedAt: timestamp.Now(),
-	}); err != nil {
-		return fmt.Errorf("heartbeat update: %w", err)
+// syncNamedSession brings the status of the running session (name, path) up
+// to date.
+func syncNamedSession(ctx context.Context, queries *sqlc.Queries, homeDir, name, path string, screen func() string, state *monitorState) error {
+	row, err := queries.GetSession(ctx, sqlc.GetSessionParams{Name: name, Path: path})
+	if errors.Is(err, sql.ErrNoRows) {
+		// The row is gone although the session runs, as when Prune ran while
+		// the session was starting: it is made again, as `muxac wrap` makes
+		// it, since a session without a row is not listed.
+		state.forget(name + ":" + path)
+		if err := queries.EnsureSession(ctx, sqlc.EnsureSessionParams{
+			Name:      name,
+			Path:      path,
+			Status:    string(status.Idle),
+			UpdatedAt: timestamp.Now(),
+		}); err != nil {
+			return fmt.Errorf("make the row of session %s/%s again: %w", name, path, err)
+		}
+		return nil
 	}
+	if err != nil {
+		return fmt.Errorf("get session %s/%s: %w", name, path, err)
+	}
+	return syncSession(ctx, queries, homeDir, sqlc.ListSessionsRow(row), screen, state)
+}
 
-	dbSessions, err := queries.ListSessions(ctx)
+// SessionLister lists the running sessions, as mux.Client does.
+type SessionLister interface {
+	ListSessionNames(ctx context.Context) ([]string, error)
+}
+
+// Prune deletes the rows of the sessions that no longer run but whose servers
+// could not delete them, as when they were killed or the machine went down.
+// If a server does not answer, Prune fails without deleting anything.
+func Prune(ctx context.Context, sessions SessionLister, queries *sqlc.Queries) error {
+	// The rows are read before the running sessions are listed, so that the
+	// row of a session that starts in between is not taken for one of a
+	// session that went away.
+	rows, err := queries.ListSessions(ctx)
 	if err != nil {
 		return fmt.Errorf("list sessions: %w", err)
 	}
-
-	tmuxSessions, err := tmuxRunner.ListSessionNames(ctx)
+	running, err := sessions.ListSessionNames(ctx)
 	if err != nil {
-		return fmt.Errorf("list tmux sessions: %w", err)
+		return fmt.Errorf("list the running sessions: %w", err)
+	}
+	alive := make(map[string]bool, len(running))
+	for _, name := range running {
+		alive[name] = true
 	}
 
-	alive := make(map[string]bool, len(tmuxSessions))
-	for _, s := range tmuxSessions {
-		alive[s] = true
-	}
-
-	for _, sess := range dbSessions {
-		if err := syncSession(ctx, tmuxRunner, queries, homeDir, sess, alive, state); err != nil {
-			errs = append(errs, fmt.Errorf("sync session %s/%s: %w", sess.Name, sess.Path, err))
+	var errs []error
+	for _, row := range rows {
+		if alive[pathkey.SessionName(row.Name, row.Path)] {
+			continue
+		}
+		if err := queries.DeleteSession(ctx, sqlc.DeleteSessionParams{Name: row.Name, Path: row.Path}); err != nil {
+			errs = append(errs, fmt.Errorf("delete the row of session %s/%s: %w", row.Name, row.Path, err))
 		}
 	}
-
 	return errors.Join(errs...)
 }
 
-func syncSession(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Queries, homeDir string, sess sqlc.ListSessionsRow, alive map[string]bool, state *monitorState) error {
-	tmuxName := pathkey.TmuxSessionName(sess.Name, sess.Path)
-
-	if !alive[tmuxName] {
-		if err := queries.DeleteSession(ctx, sqlc.DeleteSessionParams{
-			Name: sess.Name,
-			Path: sess.Path,
-		}); err != nil {
-			return fmt.Errorf("delete dead session: %w", err)
-		}
-		state.forget(sess.Name + ":" + sess.Path)
-		return nil
-	}
-
+func syncSession(ctx context.Context, queries *sqlc.Queries, homeDir string, sess sqlc.ListSessionsRow, screen func() string, state *monitorState) error {
 	// The status of a session whose agent speaks the Program Status Protocol
 	// (OSC 7501) is kept in sync by `muxac wrap` from the agent's own reports.
 	// The heuristics below only make up for agents without it.
@@ -144,9 +198,9 @@ func syncSession(ctx context.Context, tmuxRunner tmux.Runner, queries *sqlc.Quer
 
 	switch agent.ToolFromString(sess.AgentTool) {
 	case agent.Codex:
-		return syncCodexSession(ctx, queries, sess, tmuxRunner, tmuxName, state)
+		return syncCodexSession(ctx, queries, sess, screen, state)
 	case agent.Gemini:
-		return syncGeminiSession(ctx, queries, homeDir, sess, tmuxRunner, tmuxName, state)
+		return syncGeminiSession(ctx, queries, homeDir, sess, screen, state)
 	case agent.Claude, agent.Unknown:
 		// Claude Code reports its status through OSC 7501, which `muxac wrap`
 		// records; there is nothing to infer for it.
@@ -188,7 +242,7 @@ type geminiInfoMessage struct {
 	Content   string `json:"content"`
 }
 
-func syncGeminiSession(ctx context.Context, queries *sqlc.Queries, homeDir string, sess sqlc.ListSessionsRow, tmuxRunner tmux.Runner, tmuxName string, state *monitorState) error {
+func syncGeminiSession(ctx context.Context, queries *sqlc.Queries, homeDir string, sess sqlc.ListSessionsRow, screen func() string, state *monitorState) error {
 	st := status.Status(sess.Status)
 	sessionKey := sess.Name + ":" + sess.Path
 
@@ -199,27 +253,22 @@ func syncGeminiSession(ctx context.Context, queries *sqlc.Queries, homeDir strin
 			if cancelled, err := detectGeminiCancellation(ctx, queries, sess, pattern, st); err != nil {
 				return err
 			} else if cancelled {
-				delete(state.capturePaneClearCount, sessionKey)
+				delete(state.captureClearCount, sessionKey)
 				delete(state.capturePromptSeen, sessionKey)
 				return nil
 			}
 		}
 	}
 
-	// Capture-pane based waiting→running detection.
+	// Screen-capture based waiting→running detection.
 	if st != status.Waiting {
-		delete(state.capturePaneClearCount, sessionKey)
+		delete(state.captureClearCount, sessionKey)
 		delete(state.capturePromptSeen, sessionKey)
 		return nil
 	}
 
-	output, err := tmuxRunner.CapturePane(ctx, tmuxName)
-	if err != nil {
-		return nil // non-fatal
-	}
-
-	if terminalShowsGeminiWaitingPrompt(output) {
-		state.capturePaneClearCount[sessionKey] = 0
+	if terminalShowsGeminiWaitingPrompt(screen()) {
+		state.captureClearCount[sessionKey] = 0
 		state.capturePromptSeen[sessionKey] = true
 		return nil
 	}
@@ -228,12 +277,12 @@ func syncGeminiSession(ctx context.Context, queries *sqlc.Queries, homeDir strin
 		return nil
 	}
 
-	state.capturePaneClearCount[sessionKey]++
-	if state.capturePaneClearCount[sessionKey] < 2 {
+	state.captureClearCount[sessionKey]++
+	if state.captureClearCount[sessionKey] < 2 {
 		return nil // debounce: need 2 consecutive clears
 	}
 
-	delete(state.capturePaneClearCount, sessionKey)
+	delete(state.captureClearCount, sessionKey)
 	delete(state.capturePromptSeen, sessionKey)
 	return queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
 		Status:    string(status.Running),
@@ -369,34 +418,29 @@ func terminalShowsGeminiWaitingPrompt(output string) bool {
 // signal via its hook system. Without this, a `running` or `waiting` session
 // would remain stuck because no Stop hook fires when the agent is interrupted.
 //
-// It uses capture-pane heuristics: while the agent is busy, the Codex TUI
+// It uses screen-capture heuristics: while the agent is busy, the Codex TUI
 // renders "esc to interrupt"; while waiting on approval, the permission
 // prompt keywords are visible. If neither indicator is present for two
 // consecutive sync ticks, the session is transitioned to idle.
-func syncCodexSession(ctx context.Context, queries *sqlc.Queries, sess sqlc.ListSessionsRow, tmuxRunner tmux.Runner, tmuxName string, state *monitorState) error {
+func syncCodexSession(ctx context.Context, queries *sqlc.Queries, sess sqlc.ListSessionsRow, screen func() string, state *monitorState) error {
 	st := status.Status(sess.Status)
 	sessionKey := sess.Name + ":" + sess.Path
 
 	if st != status.Running && st != status.Waiting {
-		delete(state.capturePaneClearCount, sessionKey)
+		delete(state.captureClearCount, sessionKey)
 		return nil
 	}
 
-	output, err := tmuxRunner.CapturePane(ctx, tmuxName)
-	if err != nil {
+	if codexShowsActivity(screen()) {
+		state.captureClearCount[sessionKey] = 0
 		return nil
 	}
 
-	if codexShowsActivity(output) {
-		state.capturePaneClearCount[sessionKey] = 0
+	state.captureClearCount[sessionKey]++
+	if state.captureClearCount[sessionKey] < 2 {
 		return nil
 	}
-
-	state.capturePaneClearCount[sessionKey]++
-	if state.capturePaneClearCount[sessionKey] < 2 {
-		return nil
-	}
-	delete(state.capturePaneClearCount, sessionKey)
+	delete(state.captureClearCount, sessionKey)
 
 	if err := queries.UpdateSessionStatusIfUnchanged(ctx, sqlc.UpdateSessionStatusIfUnchangedParams{
 		Status:    string(status.Idle),
@@ -405,7 +449,7 @@ func syncCodexSession(ctx context.Context, queries *sqlc.Queries, sess sqlc.List
 		Path:      sess.Path,
 		Status_2:  string(st),
 	}); err != nil {
-		return fmt.Errorf("update codex status to idle via capture-pane: %w", err)
+		return fmt.Errorf("update codex status to idle via screen capture: %w", err)
 	}
 	return nil
 }

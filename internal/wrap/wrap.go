@@ -1,14 +1,15 @@
-// Package wrap runs a command on a pseudo-terminal of muxac's own, placed
-// between the tmux pane and the command, so that muxac sees everything the
-// command writes to its terminal.
+// Package wrap runs a command on a pseudo-terminal of its own, placed between
+// the terminal of the session and the command, so that muxac sees everything
+// the command writes to its terminal.
 //
 // Agents that speak the Program Status Protocol (OSC 7501), such as Claude
 // Code, report through escape sequences whether they are working, blocked on
 // the user or idle — but only once their terminal has answered their support
-// query, and tmux neither answers it nor keeps the reports. wrap answers the
-// query on the terminal's behalf, consumes the reports and turns them into the
-// muxac session status. Everything else passes through unchanged in both
-// directions, so the command behaves as if it ran in the pane directly.
+// query, and the terminal of the session neither answers it nor keeps the
+// reports. wrap answers the query on the terminal's behalf, consumes the
+// reports and turns them into the muxac session status. Everything else
+// passes through unchanged in both directions, so the command behaves as if it
+// ran on the terminal of the session directly.
 package wrap
 
 import (
@@ -18,7 +19,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"os/signal"
 	"sync"
 	"syscall"
 	"time"
@@ -27,6 +27,8 @@ import (
 	"golang.org/x/term"
 
 	"github.com/110y/muxac/internal/programstatus"
+	"github.com/110y/muxac/internal/pty"
+	"github.com/110y/muxac/internal/signals"
 	"github.com/110y/muxac/internal/status"
 )
 
@@ -35,9 +37,10 @@ import (
 // process that inherited the terminal can keep it open indefinitely.
 const outputDrainTimeout = 500 * time.Millisecond
 
-// forwardedSignals are relayed to the command. SIGHUP arrives when the tmux
-// pane is closed; with the terminal in raw mode, SIGINT and SIGQUIT only come
-// from kill(1) and the like, as their keys reach the command as plain input.
+// forwardedSignals are relayed to the command. SIGHUP arrives when the session
+// is killed and its terminal hangs up; with the terminal in raw mode, SIGINT
+// and SIGQUIT only come from kill(1) and the like, as their keys reach the
+// command as plain input.
 var forwardedSignals = []os.Signal{syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT}
 
 // Options configures Run.
@@ -46,7 +49,7 @@ type Options struct {
 	// PATH unless it contains a slash.
 	Argv []string
 	// Stdin and Stdout are the terminal Run relays to and from, normally the
-	// tmux pane.
+	// terminal of the session.
 	Stdin  *os.File
 	Stdout *os.File
 	// OnStatus is called with the session status derived from the command's
@@ -97,7 +100,7 @@ func Run(opts Options) (int, error) {
 		}()
 	}
 
-	ptmx, tty, err := openPTY()
+	ptmx, tty, err := pty.Open()
 	if err != nil {
 		return 0, err
 	}
@@ -117,7 +120,7 @@ func Run(opts Options) (int, error) {
 	if sizeFd, ok := terminalFd(opts.Stdin, opts.Stdout); ok {
 		// Resizes are followed from before the initial size is copied, so
 		// that none in between is missed.
-		onEachSignal(sigCtx, &handlers, syscall.SIGWINCH, func() {
+		signals.OnEach(sigCtx, &handlers, syscall.SIGWINCH, func() {
 			rep.report(copySize(ptmxFd, sizeFd))
 		})
 		rep.report(copySize(ptmxFd, sizeFd))
@@ -130,7 +133,7 @@ func Run(opts Options) (int, error) {
 	}
 
 	for _, sig := range forwardedSignals {
-		onEachSignal(sigCtx, &handlers, sig, func() {
+		signals.OnEach(sigCtx, &handlers, sig, func() {
 			rep.report(cmd.Process.Signal(sig))
 		})
 	}
@@ -182,29 +185,6 @@ func start(argv []string, tty *os.File) (*exec.Cmd, error) {
 		return nil, err
 	}
 	return cmd, nil
-}
-
-// onEachSignal calls handle every time sig arrives, until ctx is done. sig is
-// caught from the moment onEachSignal returns; the goroutine watching it is
-// tracked by handlers.
-func onEachSignal(ctx context.Context, handlers *sync.WaitGroup, sig os.Signal, handle func()) {
-	arrived, stop := signal.NotifyContext(ctx, sig)
-	handlers.Go(func() {
-		for {
-			<-arrived.Done()
-			if ctx.Err() != nil {
-				stop()
-				return
-			}
-			// The next arrival is caught before this one is handled and before
-			// its registration is dropped, so the signal is never left to its
-			// default action in between.
-			next, stopNext := signal.NotifyContext(ctx, sig)
-			stop()
-			handle()
-			arrived, stop = next, stopNext
-		}
-	})
 }
 
 // terminalFd returns the descriptor of the first file that is a terminal.
@@ -375,8 +355,8 @@ func (p *proxy) relayInput(r io.Reader) error {
 
 // relayOutput copies the command's output to the terminal, consuming the
 // program status sequences in it, until reading the pseudo-terminal fails,
-// and returns the failure. Once writing to the terminal fails — the pane is
-// gone — the output is still read and discarded, so the command never blocks
+// and returns the failure. Once writing to the terminal fails — the session
+// is gone — the output is still read and discarded, so the command never blocks
 // on a full terminal and its reports keep being handled.
 func (p *proxy) relayOutput(w io.Writer) error {
 	var scanner programstatus.Scanner

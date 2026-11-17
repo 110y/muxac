@@ -23,10 +23,10 @@ import (
 	"github.com/110y/muxac/internal/hook"
 	"github.com/110y/muxac/internal/list"
 	"github.com/110y/muxac/internal/monitor"
+	"github.com/110y/muxac/internal/mux"
 	"github.com/110y/muxac/internal/newcmd"
 	"github.com/110y/muxac/internal/remove"
 	"github.com/110y/muxac/internal/status"
-	"github.com/110y/muxac/internal/tmux"
 	"github.com/110y/muxac/internal/version"
 	"github.com/110y/muxac/internal/wrap"
 )
@@ -50,6 +50,15 @@ type exitCodeError int
 
 func (e exitCodeError) Error() string {
 	return fmt.Sprintf("exit status %d", int(e))
+}
+
+// lostServerExit makes main exit with status 1, as tmux does, when the server
+// of the attached session went away: the client has told so already.
+func lostServerExit(err error) error {
+	if errors.Is(err, mux.ErrLostServer) {
+		return exitCodeError(1)
+	}
+	return err
 }
 
 func run() error {
@@ -101,7 +110,7 @@ func run() error {
 	}
 	defer conn.Close()
 
-	tmuxRunner := &tmux.ExecRunner{}
+	runner := &mux.Client{}
 
 	switch os.Args[1] {
 	case "new":
@@ -109,7 +118,6 @@ func run() error {
 		var dir string
 		var env []string
 		var command string
-		var tmuxConf string
 		args := os.Args[2:]
 		for i := 0; i < len(args); i++ {
 			switch args[i] {
@@ -133,12 +141,6 @@ func run() error {
 					return fmt.Errorf("--env requires a KEY=VALUE argument")
 				}
 				env = append(env, args[i+1])
-				i++
-			case "--tmux-conf":
-				if i+1 >= len(args) {
-					return fmt.Errorf("--tmux-conf requires an argument")
-				}
-				tmuxConf = args[i+1]
 				i++
 			default:
 				if strings.HasPrefix(args[i], "-") {
@@ -174,14 +176,11 @@ func run() error {
 				return err
 			}
 		}
-		if err := monitor.EnsureRunning(ctx, tmuxRunner, queries); err != nil {
-			return err
-		}
 		exe, err := os.Executable()
 		if err != nil {
 			return err
 		}
-		return newcmd.Run(ctx, tmuxRunner, queries, exe, name, workDir, tmuxConf, command, env)
+		return lostServerExit(newcmd.Run(ctx, runner, queries, exe, name, workDir, command, env))
 
 	case "attach":
 		name := "default"
@@ -223,10 +222,7 @@ func run() error {
 				return err
 			}
 		}
-		if err := monitor.EnsureRunning(ctx, tmuxRunner, queries); err != nil {
-			return err
-		}
-		return attach.Run(ctx, tmuxRunner, name, workDir)
+		return lostServerExit(attach.Run(ctx, runner, name, workDir))
 
 	case "remove":
 		name := "default"
@@ -268,10 +264,7 @@ func run() error {
 				return err
 			}
 		}
-		if err := monitor.EnsureRunning(ctx, tmuxRunner, queries); err != nil {
-			return err
-		}
-		return remove.Run(ctx, tmuxRunner, queries, name, workDir)
+		return remove.Run(ctx, runner, queries, name, workDir)
 
 	case "list":
 		var opts list.Options
@@ -291,8 +284,13 @@ func run() error {
 				return fmt.Errorf("unexpected argument: %s", arg)
 			}
 		}
-		if err := monitor.EnsureRunning(ctx, tmuxRunner, queries); err != nil {
-			return err
+		// The server of every session deletes the session's row once the
+		// session ends; the rows of the sessions whose servers could not, such
+		// as killed ones, are deleted here. Sessions are listed anyway if that
+		// fails.
+		if err := monitor.Prune(ctx, runner, queries); err != nil {
+			logger := slog.New(dblog.NewHandler(queries, slog.LevelError))
+			logger.ErrorContext(ctx, "prune the rows of ended sessions failed", "error", err)
 		}
 		return list.Run(ctx, os.Stdout, queries, opts)
 
@@ -333,10 +331,7 @@ func run() error {
 		if projectDir == "" {
 			return nil
 		}
-		if err := monitor.EnsureRunning(ctx, tmuxRunner, queries); err != nil {
-			return err
-		}
-		return hook.Run(ctx, bytes.NewReader(stdinBytes), tmuxRunner, queries, sessionName, projectDir, tool)
+		return hook.Run(ctx, bytes.NewReader(stdinBytes), runner, queries, sessionName, projectDir, tool)
 
 	case "wrap":
 		name := "default"
@@ -416,11 +411,11 @@ func run() error {
 		}
 		return nil
 
-	case "monitor":
+	case "server":
 		for _, arg := range os.Args[2:] {
 			switch arg {
 			case "--help", "-h":
-				usageMonitor()
+				usageServer()
 				return nil
 			default:
 				if strings.HasPrefix(arg, "-") {
@@ -429,8 +424,28 @@ func run() error {
 				return fmt.Errorf("unexpected argument: %s", arg)
 			}
 		}
+		// A hangup ends the session as well, although nothing but kill(1)
+		// sends one: the server has no controlling terminal.
+		serverCtx, stopServer := signal.NotifyContext(ctx, syscall.SIGHUP)
+		defer stopServer()
+		// Errors are recorded even once the session is ending.
+		logCtx := context.WithoutCancel(ctx)
 		logger := slog.New(dblog.NewHandler(queries, slog.LevelError))
-		return monitor.Run(ctx, tmuxRunner, queries, homeDir, logger)
+		return mux.Serve(serverCtx, mux.ServeOptions{
+			OnError: func(err error) {
+				logger.ErrorContext(logCtx, "session server error", "error", err)
+			},
+			// The server keeps the status of its session up to date as long
+			// as the session runs, and deletes the session's row once it ends.
+			Watch: func(ctx context.Context, s mux.Session) {
+				name := s.Getenv(agent.EnvSessionName)
+				if name == "" {
+					// Only the sessions muxac new creates have rows.
+					return
+				}
+				monitor.Watch(ctx, queries, homeDir, name, s.Dir(), s.Screen, logger)
+			},
+		})
 
 	default:
 		usage()
@@ -442,31 +457,39 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `Usage: muxac <command>
 
 Commands:
-  new [--name <name>] [--dir <path>] [--env KEY=VALUE ...] [--tmux-conf <path>] <command>  Create a new tmux session
-  attach [--name <name>] [--dir <path>]                               Attach to an existing tmux session
-  remove [--name <name>] [--dir <path>]                               Remove an existing tmux session
-  list [--no-header] [--json]                                          List all muxac sessions with their status
+  new [--name <name>] [--dir <path>] [--env KEY=VALUE ...] <command>  Create a new session
+  attach [--name <name>] [--dir <path>]                               Attach to an existing session
+  remove [--name <name>] [--dir <path>]                               Remove an existing session
+  list [--no-header] [--json]                                         List all muxac sessions with their status
   hook                                                                Update status based on coding agent hook event (reads JSON from stdin)
-  version                                                             Show version information`)
+  version                                                             Show version information
+
+Detach from an attached session by pressing Ctrl+b d.
+
+Environment variables:
+  MUXAC_PREFIX           Prefix key of the key bindings, such as C-o (default: C-b)
+  MUXAC_HISTORY_LIMIT    Lines that went off the screen a session keeps (default: 10000)
+  MUXAC_TMPDIR           Directory to make the directory of the sockets in (default: /tmp)`)
 }
 
 func usageNew() {
 	fmt.Fprintln(os.Stderr, `Usage: muxac new [options] <command>
 
-Create a new tmux session and run the specified command.
+Create a new session that runs the specified command, and attach to it.
+Detach from the session by pressing Ctrl+b d.
 
 Options:
   --name <name>         Session name (default: "default")
   --dir <path>          Working directory (default: current directory)
   --env KEY=VALUE       Set environment variable (can be specified multiple times)
-  --tmux-conf <path>    Path to a custom tmux configuration file
   --help, -h            Show this help message`)
 }
 
 func usageAttach() {
 	fmt.Fprintln(os.Stderr, `Usage: muxac attach [options]
 
-Attach to an existing tmux session.
+Attach to an existing session.
+Detach from the session by pressing Ctrl+b d.
 
 Options:
   --name <name>    Session name (default: "default")
@@ -477,7 +500,7 @@ Options:
 func usageRemove() {
 	fmt.Fprintln(os.Stderr, `Usage: muxac remove [options]
 
-Remove an existing tmux session and its tracking data.
+Remove an existing session and its tracking data.
 
 Options:
   --name <name>    Session name (default: "default")
@@ -503,7 +526,7 @@ Update session status based on a coding agent hook event.
 Reads a JSON hook event from stdin.
 
 Required environment variables:
-  MUXAC_SESSION_NAME    The tmux session name
+  MUXAC_SESSION_NAME    The muxac session name
 
 Tool detection:
   GEMINI_PROJECT_DIR    Set by Gemini CLI hooks (detects Gemini)
@@ -526,10 +549,12 @@ Options:
   --help, -h       Show this help message`)
 }
 
-func usageMonitor() {
-	fmt.Fprintln(os.Stderr, `Usage: muxac monitor
+func usageServer() {
+	fmt.Fprintln(os.Stderr, `Usage: muxac server
 
-Run the background monitor process that tracks session status.
+Run the server of a session: the process that runs the session's command on a
+terminal of its own, serves the clients attached to it, and keeps the status
+of the session up to date. muxac new starts one for every session.
 
 Options:
   --help, -h    Show this help message`)

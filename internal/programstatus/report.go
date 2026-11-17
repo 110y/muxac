@@ -6,9 +6,10 @@
 //	ESC ] 7501 ; state=blocked:kind=permission:app=claude-code:msg=<base64> BEL
 //
 // Claude Code speaks the protocol (since v2.1.295), but only after the terminal
-// has answered its support query, and tmux neither answers the query nor keeps
-// the reports. muxac therefore reads them on a pseudo-terminal of its own that
-// sits between tmux and the agent (see package wrap).
+// has answered its support query, and the terminal of a muxac session neither
+// answers the query nor keeps the reports. muxac therefore reads them on a
+// pseudo-terminal of its own that sits between the terminal of the session and
+// the agent (see package wrap).
 //
 // Specification: https://www.superlogical.com/rex/docs/build/program-status
 package programstatus

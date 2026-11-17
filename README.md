@@ -48,9 +48,15 @@ $ muxac attach
 
 Download the binary from the [release page](https://github.com/110y/muxac/releases).
 
-### Prerequisites
+`muxac` runs the sessions itself and needs nothing else installed. Each session runs in a `muxac server` process of its own, which listens on a socket in `/tmp/muxac-<uid>` and keeps the status of the session up to date.
 
-- [tmux](https://github.com/tmux/tmux)
+### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `MUXAC_PREFIX` | Prefix key of the key bindings, such as `C-o` (default: `C-b`) |
+| `MUXAC_HISTORY_LIMIT` | Number of lines that went off the screen a session keeps, and shows again in the scrollback of the terminal that attaches (default: `10000`) |
+| `MUXAC_TMPDIR` | Directory to make the directory of the sockets in (default: `/tmp`) |
 
 ### Setup
 
@@ -199,7 +205,7 @@ Add the following hook configuration to your Gemini CLI settings file (e.g. `~/.
 Creates a new session and launches the specified agentic coding tool.
 
 ```bash
-$ muxac new [--name <name>] [--dir <path>] [--env KEY=VALUE ...] [--tmux-conf <path>] <command>
+$ muxac new [--name <name>] [--dir <path>] [--env KEY=VALUE ...] <command>
 ```
 
 | Flag | Description |
@@ -207,7 +213,8 @@ $ muxac new [--name <name>] [--dir <path>] [--env KEY=VALUE ...] [--tmux-conf <p
 | `--name <name>` | Session name (default: `default`) |
 | `--dir <path>` | Working directory (default: current directory) |
 | `--env KEY=VALUE` | Environment variables to pass to the session (can be specified multiple times) |
-| `--tmux-conf <path>` | Path to a tmux config file to source after session creation |
+
+Detach from the session by pressing `Ctrl+b d` (press `Ctrl+b Ctrl+b` to send `Ctrl+b` itself to the session). `MUXAC_PREFIX` sets another prefix key than `Ctrl+b`.
 
 ### `muxac list`
 
